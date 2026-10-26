@@ -1,0 +1,105 @@
+{\rtf1\ansi\ansicpg1252\deff0\nouicompat\deflang1033{\fonttbl{\f0\fnil\fcharset0 Calibri;}{\f1\fnil Calibri;}{\f2\fnil\fcharset1 Segoe UI Symbol;}}
+{\*\generator Riched20 10.0.19041}\viewkind4\uc1 
+\pard\sa200\sl276\slmult1\f0\fs22\lang9 ForgeBot: Autonomous Cyber-Physical Robotics Factory\par
+Meta Global AI Developer Hackathon \f1\emdash  "Push the Frontier" Track\par
+\par
+1. The Problem We Are Trying to Solve\par
+Hardware prototyping, robotics design, and automation engineering are historically slow, highly fragmented, and bottlenecked by deep domain silos. If an engineer, researcher, or innovator wants to build a custom robotic system (e.g., a multi-axis inspection drone or a specialized delivery rover), they must manually navigate multiple disciplines:\par
+\par
+System Design & Component Selection: Sourcing compatible motors, microcontrollers, and chassis configurations while calculating payload and power limits.\par
+\par
+Mechanical Modeling & URDF Writing: Crafting intricate XML/CAD files (Unified Robot Description Format) with exact link dimensions, mass matrices, and joint constraints.\par
+\par
+Control Software & Firmware Engineering: Writing low-level C++/MicroPython or ROS2 nodes for motor control, sensor telemetry, and inverse kinematics.\par
+\par
+Validation Friction: Waiting weeks for physical parts to ship or complex desktop simulation environments (like heavy Gazebo/ROS setups) to configure just to see if a mechanism works.\par
+\par
+The Solution: ForgeBot bridges the gap between natural language intent and cyber-physical execution. It is an agentic, end-to-end robotics factory that ingests a plain-language objective and autonomously orchestrates the design, coding, simulation, and validation of a functional robotic system in seconds.\par
+\par
+2. Complete System Architecture\par
+The architecture is built on a modular, high-performance stack separating cognitive reasoning, code generation, real-time spatial simulation, and visual processing.\par
+\par
+\f2\u9484?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9488?\f0\par
+\f2\u9474?\f0                           CLIENT LAYER (Frontend)                         \f2\u9474?\f0\par
+\f2\u9474?\f0   React + Ant Design Dashboard \f2\u9474?\f0  Three.js / WebGL 3D Interactive Canvas  \f2\u9474?\f0\par
+\f2\u9492?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9516?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9496?\f0\par
+                                     \f2\u9474?\f0  REST / WebSockets / JSON\par
+\f2\u9484?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9660?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9488?\f0\par
+\f2\u9474?\f0                         ORCHESTRATION LAYER (Backend)                    \f2\u9474?\f0\par
+\f2\u9474?\f0      FastAPI / Django Asynchronous Agent Workers & State Engine          \f2\u9474?\f0\par
+\f2\u9492?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9516?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9496?\f0\par
+         \f2\u9484?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9532?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9488?\f0\par
+         \f2\u9660?\f0                            \f2\u9660?\f0                            \f2\u9660?\f0\par
+\f2\u9484?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9488?\f0        \f2\u9484?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9488?\f0        \f2\u9484?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9488?\f0\par
+\f2\u9474?\f0   METAMODEL API:   \f2\u9474?\f0        \f2\u9474?\f0   METAMODEL API: \f2\u9474?\f0        \f2\u9474?\f0   METAMODEL API:  \f2\u9474?\f0\par
+\f2\u9474?\f0   Muse Spark /     \f2\u9474?\f0        \f2\u9474?\f0     Muse Code    \f2\u9474?\f0        \f2\u9474?\f0      SAM 3.1      \f2\u9474?\f0\par
+\f2\u9474?\f0   Llama (Reasoning)\f2\u9474?\f0        \f2\u9474?\f0  (URDF & C++)    \f2\u9474?\f0        \f2\u9474?\f0  (Vision/Schematic\f2\u9474?\f0\par
+\f2\u9492?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9516?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9496?\f0        \f2\u9492?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9516?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9496?\f0        \f2\u9492?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9516?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9496?\f0\par
+          \f2\u9474?\f0                           \f2\u9474?\f0                          \f2\u9474?\f0\par
+          \f2\u9492?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9532?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9496?\f0\par
+                                     \f2\u9660?\f0\par
+\f2\u9484?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9488?\f0\par
+\f2\u9474?\f0                       SIMULATION & EXECUTION LAYER                       \f2\u9474?\f0\par
+\f2\u9474?\f0         Dynamic URDF Parser \f2\u9472?\u9472?\u9658?\f0  Three.js Physics Sandbox (Gravity/Joints)  \f2\u9474?\f0\par
+\f2\u9492?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9472?\u9496?\f0\par
+Component Breakdown\par
+Client Layer (Frontend):\par
+\par
+Built with React and Ant Design for a clean, professional engineering control panel.\par
+\par
+Features an integrated Three.js / WebGL 3D Interactive Canvas that dynamically constructs and animates the robot's 3D meshes in real-time.\par
+\par
+Orchestration Layer (Backend):\par
+\par
+Powered by a robust FastAPI / Django async engine that manages multi-step agent execution loops, data caching, and strict JSON schema validation.\par
+\par
+AI Intelligence Layer (Meta Model API):\par
+\par
+Muse Spark / Llama: Acts as the cognitive engine for architectural reasoning, mission evaluation, and structured Bill of Materials (BOM) compilation.\par
+\par
+Muse Code: Specialized for writing flawless, idiomatic URDF configuration files, kinematic solver equations, and target microcontroller firmware (C++ / Python / ROS2 nodes).\par
+\par
+SAM 3.1: Processes optional uploaded technical sketches, hand-drawn blueprints, or hardware schematics, segmenting components to extract layout constraints.\par
+\par
+Simulation Layer:\par
+\par
+A browser-based physics runner that reads the generated URDF structure, applies collision boundaries, and tests physical performance (center of gravity, torque limits, drive dynamics) directly in the browser.\par
+\par
+3. How the Project is Meant to Run (End-to-End Workflow)\par
+The user journey through the application follows a seamless, step-by-step automated pipeline:\par
+\par
+Step 1: Natural Language Intent Ingestion\par
+The user opens the dashboard and inputs a mission brief into the prompt bar, for example:\par
+\par
+"Design a 4-wheeled autonomous surveillance rover with a 2-DOF pan-tilt camera gimbal."\par
+\par
+Alternatively, the user can upload a reference sketch, which SAM 3.1 instantly parses and segments to extract structural constraints.\par
+\par
+Step 2: Cognitive Spec & BOM Compilation\par
+The backend invokes Muse Spark under strict JSON schema rules.\par
+\par
+The model analyzes the physical requirements, computes actuator specifications, and generates a structured Bill of Materials (BOM) (listing microcontrollers, motor types, chassis dimensions, and power sources) alongside a kinematic tree topology.\par
+\par
+Step 3: Automated Code & URDF Generation\par
+Once the BOM is locked, the orchestration engine triggers Muse Code.\par
+\par
+The system streams the generation of two critical assets:\par
+\par
+The URDF XML File: Defining links, joints, inertias, and visual primitives.\par
+\par
+The Control Firmware: Generating Python/C++ code snippets for motor drivers and sensor feedback loops.\par
+\par
+Step 4: Digital Twin Assembly & Physics Simulation\par
+The frontend receives the compiled URDF text payload.\par
+\par
+The Three.js Canvas dynamically parses the XML tree, instantiates 3D geometric meshes, and links them via simulated joints.\par
+\par
+The user hits "Run Simulation", activating the physics sandbox. They can watch the rover drive, test turning radiuses, and observe the camera gimbal pivot in response to simulated commands.\par
+\par
+Step 5: Export & Handover\par
+Satisfied with the virtual prototype, the user clicks "Export Package", downloading a complete ZIP containing the structured BOM, URDF file, ROS2/Microcontroller code, and system architecture report ready for real-world manufacturing or further hardware refinement.\par
+\par
+Ready to Code?\par
+This architecture hits every checkmark for the "Push the Frontier" track: it introduces multi-step agent reasoning, multimodal vision processing (SAM 3.1), advanced code generation (Muse Code), and interactive 3D WebGL rendering.\par
+}
+ 
