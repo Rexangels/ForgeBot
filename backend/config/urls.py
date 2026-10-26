@@ -6,6 +6,7 @@ from core import views
 
 urlpatterns = [
     path("api/v1/vision/analyze", views.analyze_scene, name="analyze-scene"),
+    path("api/v1/projects/<int:project_id>/image-design", views.create_image_design, name="image-design"),
     path("api/v1/auth/csrf", views.csrf_token, name="csrf"),
     path("api/v1/auth/login", views.login_view, name="login"),
     path("api/v1/auth/logout", views.logout_view, name="logout"),

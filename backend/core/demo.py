@@ -32,6 +32,16 @@ from .robot_arm import (
     propose_tabletop_arm,
     validate_arm_design,
 )
+from .humanoid import (
+    HUMANOID_BOM_VERSION,
+    HUMANOID_SPEC_VERSION,
+    generate_humanoid_starter_code,
+    generate_humanoid_urdf,
+    humanoid_bom,
+    propose_humanoid,
+    validate_humanoid_bom,
+    validate_humanoid_design,
+)
 from .schemas import (
     BOM_SCHEMA_VERSION,
     SPEC_SCHEMA_VERSION,
@@ -74,6 +84,18 @@ def run_to_review(
             return errors
         bom = arm_bom(spec)
         spec_version, bom_version = ARM_SPEC_SCHEMA_VERSION, ARM_BOM_SCHEMA_VERSION
+    elif robot_class == "research_humanoid":
+        try:
+            spec = propose_humanoid(mission)
+        except (MetaModelError, ValueError) as exc:
+            errors = [str(exc)]
+            store_artifact(
+                job, "report", json.dumps({"errors": errors}, indent=2), "report/v1"
+            )
+            job.transition(states.FAILED)
+            return errors
+        bom = humanoid_bom(spec)
+        spec_version, bom_version = HUMANOID_SPEC_VERSION, HUMANOID_BOM_VERSION
     else:
         spec = generate_rover_spec()
         bom = generate_rover_bom()
@@ -89,9 +111,41 @@ def run_from_approval(job: Job) -> dict:
     job.transition(states.GENERATING)
     bom_doc = json.loads(job.artifacts.get(kind="bom").body)
     spec_doc = json.loads(job.artifacts.get(kind="spec").body)
+    if spec_doc.get("robot_class") == "image_robot_design":
+        from .image_design import generate_image_robot_urdf, generate_openscad
+
+        urdf = generate_image_robot_urdf(spec_doc)
+        store_artifact(job, "urdf", urdf, "urdf/v1")
+        store_artifact(job, "cad", generate_openscad(spec_doc), "openscad/v1")
+        job.transition(states.VALIDATING)
+        findings = [
+            {"severity": item.severity, "path": item.artifact_path, "message": item.message, "remediation": item.remediation}
+            for item in validate_urdf(urdf, "image_robot.urdf")
+        ]
+        blockers = [item for item in findings if item["severity"] == SEVERITY_BLOCKER]
+        store_artifact(job, "report", json.dumps({"findings": findings, "label": "conceptual geometry only"}, indent=2), "report/v1")
+        simulation = {"status": "not_run", "reason": "Image-derived concept has no actuator, mass-property, collision, or controller model yet."}
+        store_artifact(job, "sim", json.dumps(simulation, indent=2), "sim/v1")
+        if blockers:
+            job.transition(states.FAILED)
+            return {"passed": False, "blockers": len(blockers), "simulation": "not run"}
+        manifest = build_manifest(
+            input_revision=job.input_revision,
+            provider=job.provider,
+            model=job.model,
+            artifact_versions={"spec": "image-robot-concept/v1", "urdf": "urdf/v1", "cad": "openscad/v1", "validators": VALIDATOR_VERSION},
+            validator_version=VALIDATOR_VERSION,
+            sim_config=simulation,
+        )
+        store_artifact(job, "manifest", manifest_json(manifest), "export/v1")
+        job.transition(states.SUCCEEDED)
+        return {"passed": True, "blockers": 0, "simulation": "not run; concept geometry only"}
     if spec_doc.get("robot_class") == "tabletop_robot_arm":
         urdf = generate_arm_urdf(spec_doc)
         code = generate_arm_starter_code(spec_doc)
+    elif spec_doc.get("robot_class") == "research_humanoid":
+        urdf = generate_humanoid_urdf(spec_doc)
+        code = generate_humanoid_starter_code(spec_doc)
     else:
         urdf = generate_rover_urdf()
         code = generate_starter_code()
@@ -108,6 +162,11 @@ def run_from_approval(job: Job) -> dict:
     ]
     if spec_doc.get("robot_class") == "tabletop_robot_arm":
         validators = (("spec", spec_doc, validate_arm_design),)
+    elif spec_doc.get("robot_class") == "research_humanoid":
+        validators = (
+            ("spec", spec_doc, validate_humanoid_design),
+            ("bom", bom_doc, validate_humanoid_bom),
+        )
     else:
         validators = (("spec", spec_doc, validate_spec), ("bom", bom_doc, validate_bom))
     for label, doc, validator in validators:
@@ -121,25 +180,36 @@ def run_from_approval(job: Job) -> dict:
         job.transition(states.FAILED)
         return {"passed": False, "blockers": len(blockers)}
 
-    if spec_doc.get("robot_class") == "tabletop_robot_arm":
+    if spec_doc.get("robot_class") in ("tabletop_robot_arm", "research_humanoid"):
+        is_humanoid = spec_doc.get("robot_class") == "research_humanoid"
+        spec_version = HUMANOID_SPEC_VERSION if is_humanoid else ARM_SPEC_SCHEMA_VERSION
+        bom_version = HUMANOID_BOM_VERSION if is_humanoid else ARM_BOM_SCHEMA_VERSION
+        simulation_status = {
+            "status": "not_run",
+            "reason": "Humanoid physics simulation is the next milestone; this run produced a URDF kinematic concept only."
+            if is_humanoid else "Arm physics simulation is not implemented yet.",
+        }
         manifest = build_manifest(
             input_revision=job.input_revision,
             provider=job.provider,
             model=job.model,
             artifact_versions={
-                "spec": ARM_SPEC_SCHEMA_VERSION,
-                "bom": ARM_BOM_SCHEMA_VERSION,
+                "spec": spec_version,
+                "bom": bom_version,
                 "validators": VALIDATOR_VERSION,
             },
             validator_version=VALIDATOR_VERSION,
-            sim_config={
-                "status": "not_run",
-                "reason": "Arm physics simulation is not implemented yet.",
-            },
+            sim_config=simulation_status,
         )
+        if is_humanoid:
+            store_artifact(job, "sim", json.dumps(simulation_status, indent=2), "sim/v1")
         store_artifact(job, "manifest", manifest_json(manifest), "export/v1")
         job.transition(states.SUCCEEDED)
-        return {"passed": True, "blockers": 0, "simulation": "not implemented"}
+        return {
+            "passed": True,
+            "blockers": 0,
+            "simulation": "not implemented" if not is_humanoid else "not run; physics integration is next",
+        }
 
     job.transition(states.SIMULATING)
     sim = run_waypoint_route(

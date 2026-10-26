@@ -17,11 +17,11 @@ from .demo import run_to_review
 from .models import Job
 
 
-def _run_proposal(job_id: int, mission: dict) -> None:
+def _run_proposal(job_id: int, mission: dict, robot_class: str) -> None:
     close_old_connections()
     try:
         job = Job.objects.get(pk=job_id)
-        run_to_review(job, mission, "tabletop_robot_arm")
+        run_to_review(job, mission, robot_class)
     except Job.DoesNotExist:
         return
     except Exception:
@@ -32,7 +32,7 @@ def _run_proposal(job_id: int, mission: dict) -> None:
                 store_artifact(
                     job,
                     "report",
-                    json.dumps({"errors": ["Arm design generation stopped unexpectedly."]}, indent=2),
+                    json.dumps({"errors": ["Robot design generation stopped unexpectedly."]}, indent=2),
                     "report/v1",
                 )
                 job.transition(states.FAILED)
@@ -42,6 +42,11 @@ def _run_proposal(job_id: int, mission: dict) -> None:
         close_old_connections()
 
 
-def start_arm_proposal(job_id: int, mission: dict) -> None:
-    thread = Thread(target=_run_proposal, args=(job_id, mission), daemon=True)
+def start_design_proposal(job_id: int, mission: dict, robot_class: str) -> None:
+    thread = Thread(target=_run_proposal, args=(job_id, mission, robot_class), daemon=True)
     thread.start()
+
+
+def start_arm_proposal(job_id: int, mission: dict) -> None:
+    """Backward-compatible helper retained for management callers."""
+    start_design_proposal(job_id, mission, "tabletop_robot_arm")

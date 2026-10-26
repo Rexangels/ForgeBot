@@ -3,6 +3,8 @@ import { api } from "./api.js";
 import { ArtifactViewer, StateChip } from "./components.jsx";
 import RoverView from "./RoverView.jsx";
 import ArmModelViewer from "./ArmModelViewer.jsx";
+import UrdfModelViewer from "./UrdfModelViewer.jsx";
+import ComponentAssemblyEditor from "./ComponentAssemblyEditor.jsx";
 import { imagePointToWorkcell, solvePlanarHomography } from "./cameraCalibration.js";
 
 const TERMINAL = ["succeeded", "failed", "cancelled"];
@@ -136,7 +138,7 @@ function ProjectsScreen({ onOpen }) {
 
 const WORK_AREA_CORNERS = [[-0.1, -0.3], [0.7, -0.3], [0.7, 0.3], [-0.1, 0.3]];
 
-function VisionPanel({ onUseTarget }) {
+function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
   const videoRef = useRef(null);
   const imageRef = useRef(null);
   const streamRef = useRef(null);
@@ -151,6 +153,20 @@ function VisionPanel({ onUseTarget }) {
   const [calibration, setCalibration] = useState(null);
   const [selectedObject, setSelectedObject] = useState(0);
   const [targetEdit, setTargetEdit] = useState({ x: 0.3, y: 0, z: 0.04 });
+  const [designBrief, setDesignBrief] = useState("Create an original compact robot inspired by this image. Keep the visible silhouette and component arrangement, but make the design suitable for a simple research prototype.");
+  const [designHeight, setDesignHeight] = useState(0.45);
+  const [designConstraints, setDesignConstraints] = useState("");
+  const [designBusy, setDesignBusy] = useState(false);
+
+  const selectReferenceImage = (file) => {
+    if (!file) return;
+    setImage(file);
+    setObservation(null);
+    setError("");
+    setCalibration(null);
+    setCalibrationPoints([]);
+    onUseTarget(null);
+  };
 
   useEffect(() => {
     if (!image) { setPreviewUrl(""); return undefined; }
@@ -210,7 +226,7 @@ function VisionPanel({ onUseTarget }) {
     canvas.getContext("2d").drawImage(video, 0, 0);
     canvas.toBlob((blob) => {
       if (blob) {
-        setImage(new File([blob], `workcell-${Date.now()}.jpg`, { type: "image/jpeg" }));
+        selectReferenceImage(new File([blob], `workcell-${Date.now()}.jpg`, { type: "image/jpeg" }));
         setObservation(null);
         stopCamera();
       }
@@ -233,6 +249,20 @@ function VisionPanel({ onUseTarget }) {
       setError(err.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const createImageDesign = async () => {
+    if (!image || !designBrief.trim()) return;
+    setDesignBusy(true);
+    setError("");
+    try {
+      const created = await api.createImageDesign(projectId, image, { brief: designBrief, targetHeightM: designHeight, constraints: designConstraints });
+      onOpenJob(created.id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDesignBusy(false);
     }
   };
 
@@ -261,8 +291,16 @@ function VisionPanel({ onUseTarget }) {
         <div className="vision-capture">
           {cameraActive ? <video ref={videoRef} autoPlay playsInline muted className="vision-preview" /> : previewUrl ? <div className={`scene-image-frame ${calibrating ? "calibration-mode" : ""}`}><img ref={imageRef} src={previewUrl} alt="Selected workcell image" onClick={captureCalibrationPoint} />{observation?.objects?.map((object, index) => <span key={`${object.label}-${index}`} className={`vision-box ${index === selectedObject ? "selected" : ""}`} style={{ left: `${object.image_region.x_min * 100}%`, top: `${object.image_region.y_min * 100}%`, width: `${(object.image_region.x_max - object.image_region.x_min) * 100}%`, height: `${(object.image_region.y_max - object.image_region.y_min) * 100}%` }}><i>{object.label}</i></span>)}{calibrationPoints.map((point, index) => <span className="calibration-pin" key={`cal-${index}`} style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }}>{index + 1}</span>)}{calibrating && <span className="calibration-hint">Click corner {calibrationPoints.length + 1} of 4</span>}</div> : <div className="vision-empty"><span>◉</span><strong>No image captured</strong><small>Use the camera or select a workcell photo.</small></div>}
           <div className="vision-actions">
-            {cameraActive ? <><button className="primary-action" onClick={capture}>Capture frame</button><button className="secondary-action" onClick={stopCamera}>Close camera</button></> : <><button className="secondary-action" onClick={startCamera}>Open camera</button><label className="secondary-action vision-file">Choose image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { const next = event.target.files?.[0]; if (next) { setImage(next); setObservation(null); setError(""); setCalibration(null); setCalibrationPoints([]); onUseTarget(null); } }} /></label></>}
+            {cameraActive ? <><button className="primary-action" onClick={capture}>Capture frame</button><button className="secondary-action" onClick={stopCamera}>Close camera</button></> : <><button className="secondary-action" onClick={startCamera}>Open camera</button><label className="secondary-action vision-file">Choose image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { selectReferenceImage(event.target.files?.[0]); event.target.value = ""; }} /></label></>}
             <button className="primary-action" disabled={!image || busy || cameraActive} onClick={analyze}>{busy ? "Analyzing image…" : "Ask Meta to inspect →"}</button>
+          </div>
+          <div className="image-design-card"><div><span className="eyebrow">IMAGE-TO-ROBOT CONCEPT</span><strong>Design a robot from this reference</strong><small>Meta proposes the visible shape and part layout. ForgeBot builds primitive CAD source and a 3D concept for review.</small></div>
+            <div className="design-reference-picker"><label htmlFor="robot-reference-image">Robot reference image</label><label className="design-reference-button" htmlFor="robot-reference-image">{image ? "Replace reference image" : "Choose a robot image"}<input id="robot-reference-image" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { selectReferenceImage(event.target.files?.[0]); event.target.value = ""; }} /></label>{image ? <div className="design-reference-selected"><img src={previewUrl} alt="Selected robot design reference" /><span><strong>{image.name}</strong><small>Shared with AI eyes · this image will guide robot concept generation</small></span></div> : <small className="image-design-note">Choose a robot photo or reference illustration. The same image is available to AI eyes for scene understanding.</small>}</div>
+            <label>What should the robot do?<textarea rows={3} maxLength={2000} value={designBrief} onChange={(event) => setDesignBrief(event.target.value)} /></label>
+            <div className="target-edit-grid"><label>Approximate robot height (m)<input type="number" min="0.05" max="3" step="0.01" value={designHeight} onChange={(event) => setDesignHeight(Number(event.target.value))} /></label></div>
+            <label>Constraints (optional)<input maxLength={2000} value={designConstraints} onChange={(event) => setDesignConstraints(event.target.value)} placeholder="Budget, workspace, wheels or legs, payload…" /></label>
+            <button className="primary-action" disabled={!image || !designBrief.trim() || designBusy || cameraActive} onClick={createImageDesign}>{designBusy ? "Sending reference to Meta…" : "Generate robot concept →"}</button>
+            <small className="image-design-note">The image is sent to Meta only when you generate. The model does not recover true dimensions or hidden mechanisms. No reference image is retained by ForgeBot.</small>
           </div>
           {error && <p className="error">{error}</p>}
           <p className="vision-privacy">Images are sent to Meta only when you select <strong>Ask Meta</strong>. ForgeBot does not store the image or analysis. Use a non-sensitive workcell image.</p>
@@ -315,6 +353,9 @@ function ProjectScreen({ project, onBack, onOpenJob, onUseVisionTarget }) {
       setRunning(false);
     }
   };
+  const pipelineLabels = robotClass === "research_humanoid"
+    ? ["Send mission to Meta", "Review humanoid concept", "Generate 71-DOF robot description", "Validate topology & limits", "Inspect 3D model"]
+    : ["Send mission to Meta", "Review generated arm design", "Generate URDF & controls", "Validate design package", "3D pose editor"];
   return (
     <section className="workbench">
       <div className="page-heading">
@@ -324,41 +365,48 @@ function ProjectScreen({ project, onBack, onOpenJob, onUseVisionTarget }) {
           <h2>{project.name}</h2>
           <p className="muted">Shape the mission, inspect the robot, then build and review its software.</p>
         </div>
-          <span className="robot-class">{robotClass === "tabletop_robot_arm" ? "AI design · tabletop arm" : "Prototype · rover"}</span>
+          <span className="robot-class">{robotClass === "tabletop_robot_arm" ? "AI design · tabletop arm" : robotClass === "research_humanoid" ? "AI design · humanoid concept" : "Prototype · rover"}</span>
       </div>
 
       <div className="studio-grid project-studio">
         <aside className="studio-panel mission-panel">
           <div className="panel-heading"><span className="step-number">01</span><div><h3>Mission brief</h3><p className="muted">Describe what the robot should do.</p></div></div>
           <form onSubmit={run}>
-            <label>Robot platform<select value={robotClass} onChange={(e) => setRobotClass(e.target.value)}><option value="tabletop_robot_arm">Tabletop robot arm · Meta generated</option><option value="differential-drive-rover">Differential-drive rover · demo</option></select></label>
+            <label>Robot platform<select value={robotClass} onChange={(e) => {
+              const nextClass = e.target.value;
+              setRobotClass(nextClass);
+              if (task === "Pick up small objects and sort them into bins on a tabletop" && nextClass === "research_humanoid") {
+                setTask("Design a compact research humanoid for indoor object pickup and placement, with stable standing, two arms, dexterous hands, and onboard vision.");
+                setEnvironment("indoor research lab with a level floor and a clear 3 x 3 m work area");
+              }
+            }}><option value="tabletop_robot_arm">Tabletop robot arm · Meta generated</option><option value="research_humanoid">Research humanoid · Meta generated</option><option value="differential-drive-rover">Differential-drive rover · demo</option></select></label>
             <label>Mission task<textarea value={task} onChange={(e) => setTask(e.target.value)} rows={4} /></label>
             <label>Operating environment<input value={environment} onChange={(e) => setEnvironment(e.target.value)} /></label>
             <label>Units<select value={units} onChange={(e) => setUnits(e.target.value)}><option value="si">SI units</option><option value="metric">Metric</option><option value="imperial">Imperial</option></select></label>
             {error && <p className="error">{error}</p>}
             <button className="primary-action" type="submit" disabled={running}>{running ? "Preparing workspace…" : "Start design run"}<span aria-hidden="true">→</span></button>
           </form>
-          <p className="panel-footnote">Arm proposals come from Meta Model API, then pass local checks. They are conceptual designs, not manufacturing or safety approvals.</p>
+          <p className="panel-footnote">{robotClass === "research_humanoid" ? "Meta proposes an original humanoid concept. ForgeBot builds and validates a kinematic URDF; physics, balance, and manufacturing design remain future milestones." : "Arm proposals come from Meta Model API, then pass local checks. They are conceptual designs, not manufacturing or safety approvals."}</p>
         </aside>
 
         <section className="studio-panel canvas-panel">
-          <div className="panel-heading canvas-heading"><div><p className="eyebrow">DESIGN CANVAS</p><h3>{robotClass === "tabletop_robot_arm" ? "Tabletop arm assembly" : "Rover route concept"}</h3></div><span className="canvas-mode">{robotClass === "tabletop_robot_arm" ? "3D EDITOR" : "2D PREVIEW"}</span></div>
-          <div className="canvas-stage">{robotClass === "tabletop_robot_arm" ? <ArmModelViewer /> : <RoverView />}</div>
-          <div className="canvas-caption"><span className="legend-dot" /> {robotClass === "tabletop_robot_arm" ? "Arm design preview" : "Rover route preview"} <span>·</span> <span className="muted">{robotClass === "tabletop_robot_arm" ? "URDF assembly and target planning open in a design run" : "Preview only, no physics simulation"}</span></div>
-          <div className="canvas-specs"><div><span>Platform</span><strong>{robotClass === "tabletop_robot_arm" ? "4-axis tabletop arm" : "Differential drive"}</strong></div><div><span>Editor</span><strong>{robotClass === "tabletop_robot_arm" ? "Orbit + joint controls" : "Route preview"}</strong></div><div><span>Work area</span><strong>{robotClass === "tabletop_robot_arm" ? "0.8 × 0.6 m table" : "5 × 5 m indoor"}</strong></div></div>
+          <div className="panel-heading canvas-heading"><div><p className="eyebrow">DESIGN CANVAS</p><h3>{robotClass === "tabletop_robot_arm" ? "Tabletop arm assembly" : robotClass === "research_humanoid" ? "Humanoid kinematic concept" : "Rover route concept"}</h3></div><span className="canvas-mode">{robotClass === "differential-drive-rover" ? "2D PREVIEW" : "3D MODEL"}</span></div>
+          <div className="canvas-stage">{robotClass === "tabletop_robot_arm" ? <ArmModelViewer /> : robotClass === "research_humanoid" ? <UrdfModelViewer /> : <RoverView />}</div>
+          <div className="canvas-caption"><span className="legend-dot" /> {robotClass === "tabletop_robot_arm" ? "Arm design preview" : robotClass === "research_humanoid" ? "New articulated robot platform" : "Rover route preview"} <span>·</span> <span className="muted">{robotClass === "tabletop_robot_arm" ? "URDF assembly and target planning open in a design run" : robotClass === "research_humanoid" ? "Generate a humanoid proposal to create its robot model" : "Preview only, no physics simulation"}</span></div>
+          <div className="canvas-specs"><div><span>Platform</span><strong>{robotClass === "tabletop_robot_arm" ? "4-axis tabletop arm" : robotClass === "research_humanoid" ? "31-DOF body concept" : "Differential drive"}</strong></div><div><span>Editor</span><strong>{robotClass === "tabletop_robot_arm" ? "Orbit + joint controls" : robotClass === "research_humanoid" ? "URDF orbit viewer" : "Route preview"}</strong></div><div><span>Simulation</span><strong>{robotClass === "research_humanoid" ? "Physics milestone next" : robotClass === "tabletop_robot_arm" ? "Kinematic preview" : "Route estimate"}</strong></div></div>
         </section>
 
         <aside className="studio-panel agent-panel">
           <div className="panel-heading"><span className="agent-orb">✦</span><div><p className="eyebrow">FORGEBOT</p><h3>Build workflow</h3></div></div>
-          <p className="agent-note">Meta drafts the arm specification and parts list. ForgeBot validates the proposal, then generates a URDF and starter controls for review.</p>
+          <p className="agent-note">{robotClass === "research_humanoid" ? "Meta proposes an original humanoid body and sensor layout. ForgeBot generates a kinematic URDF, conceptual parts list, and control interface for review." : "Meta drafts the arm specification and parts list. ForgeBot validates the proposal, then generates a URDF and starter controls for review."}</p>
           <ol className="pipeline-list">
-            {["Send mission to Meta", "Review generated arm design", "Generate URDF & controls", "Validate design package", "3D pose editor"].map((label, i) => <li key={label}><span className="pipeline-dot">{String(i + 1).padStart(2, "0")}</span><span>{label}</span><span className="pipeline-pending">WAITING</span></li>)}
+            {pipelineLabels.map((label, i) => <li key={label}><span className="pipeline-dot">{String(i + 1).padStart(2, "0")}</span><span>{label}</span><span className="pipeline-pending">WAITING</span></li>)}
           </ol>
           <div className="agent-status"><span className="status-light" /> Ready when you are</div>
         </aside>
       </div>
 
-      <VisionPanel onUseTarget={onUseVisionTarget} />
+      <VisionPanel projectId={project.id} onOpenJob={onOpenJob} onUseTarget={onUseVisionTarget} />
 
       <section className="runs-section">
         <div className="section-heading"><div><p className="eyebrow">PROJECT HISTORY</p><h3>Recent design runs</h3></div><span className="muted">{jobs?.length || 0} runs</span></div>
@@ -400,7 +448,7 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
   }, [refresh]);
   const openPanel = async (panel) => {
     setSelectedPanel(panel);
-    const kind = ({ design: "spec", urdf: "urdf", parts: "bom", code: "code", validation: "report", simulation: "sim" })[panel];
+    const kind = ({ design: "spec", urdf: "urdf", parts: "bom", cad: "cad", code: "code", validation: "report", simulation: "sim" })[panel];
     const artifact = job?.artifacts.find((item) => item.kind === kind);
     if (artifact && !bodies[artifact.id]) {
       try {
@@ -411,7 +459,7 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
       }
     }
   };
-  const activeKind = ({ design: "spec", urdf: "urdf", parts: "bom", code: "code", validation: "report", simulation: "sim" })[selectedPanel];
+  const activeKind = ({ design: "spec", urdf: "urdf", parts: "bom", cad: "cad", code: "code", validation: "report", simulation: "sim" })[selectedPanel];
   const activeArtifact = job?.artifacts.find((item) => item.kind === activeKind);
   const activeBody = activeArtifact && bodies[activeArtifact.id];
   const designArtifact = job?.artifacts.find((item) => item.kind === "spec");
@@ -468,13 +516,23 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
       setBusy(false);
     }
   };
-  const workflowSteps = job?.robot_class === "tabletop_robot_arm"
+  const isHumanoid = job?.robot_class === "research_humanoid";
+  const isImageDesign = job?.robot_class === "image_robot_design";
+  const workflowSteps = isImageDesign
+    ? [
+        { state: "specifying", label: "Interpret reference image" },
+        { state: "awaiting_review", label: "Review concept & assumptions" },
+        { state: "generating", label: "Build primitive CAD & URDF" },
+        { state: "validating", label: "Validate component tree" },
+        { state: "succeeded", label: "Inspect 3D concept" },
+      ]
+    : job?.robot_class === "tabletop_robot_arm" || isHumanoid
     ? [
         { state: "specifying", label: "Generate design proposal" },
         { state: "awaiting_review", label: "Review assumptions & BOM" },
-        { state: "generating", label: "Build URDF & controls" },
+        { state: "generating", label: isHumanoid ? "Build humanoid URDF & controls" : "Build URDF & controls" },
         { state: "validating", label: "Validate robot package" },
-        { state: "succeeded", label: "Prepare design artifacts" },
+        { state: "succeeded", label: isHumanoid ? "Prepare humanoid model" : "Prepare design artifacts" },
       ]
     : [
         { state: "specifying", label: "Interpret mission" },
@@ -490,38 +548,41 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
   const isFailed = job?.state === "failed" || job?.state === "cancelled";
   return (
     <section className="workbench job-workbench">
-      <div className="workbench-titlebar"><button className="link" onClick={onBack}>← Project workspace</button><div className="job-title"><div><p className="eyebrow">BUILD SESSION · #{jobId}</p><h2>{job?.robot_class === "tabletop_robot_arm" ? "Tabletop arm design" : "Robot prototype"}</h2></div>{job && <StateChip state={job.state} />}</div></div>
+      <div className="workbench-titlebar"><button className="link" onClick={onBack}>← Project workspace</button><div className="job-title"><div><p className="eyebrow">BUILD SESSION · #{jobId}</p><h2>{job?.robot_class === "tabletop_robot_arm" ? "Tabletop arm design" : isHumanoid ? "Research humanoid concept" : isImageDesign ? "Image-guided robot concept" : "Robot prototype"}</h2></div>{job && <StateChip state={job.state} />}</div></div>
       {error && <p className="error">{error}</p>}
       {job?.state === "awaiting_review" && <div className="review-banner"><div><strong>Design proposal is ready for your review</strong><span>Check the specification and parts list before generating robot files.</span></div><button onClick={approve} disabled={busy}>{busy ? "Building files…" : "Approve & continue →"}</button></div>}
       <div className="job-studio-grid">
         <aside className="studio-panel asset-panel">
           <div className="panel-heading"><div><p className="eyebrow">PROJECT FILES</p><h3>Robot package</h3></div></div>
-          <button className={`asset-button ${selectedPanel === "canvas" ? "active" : ""}`} onClick={() => openPanel("canvas")}><span>▦</span><div><strong>Robot canvas</strong><small>{job?.robot_class === "tabletop_robot_arm" ? "3D assembly & joint pose" : "Route & prototype view"}</small></div></button>
-          {[{ key: "design", title: "Robot design", sub: "Specification", icon: "◇", kind: "spec" }, { key: "urdf", title: "URDF model", sub: "Robot description", icon: "⌘", kind: "urdf" }, { key: "parts", title: "Parts list", sub: "Bill of materials", icon: "▤", kind: "bom" }, { key: "code", title: "Control software", sub: "Starter code", icon: "‹/›", kind: "code" }, { key: "validation", title: "Validation", sub: "Checks & findings", icon: "✓", kind: "report" }, { key: "simulation", title: "Simulation", sub: "Physics run", icon: "↗", kind: "sim" }].map((item) => {
+          <button className={`asset-button ${selectedPanel === "canvas" ? "active" : ""}`} onClick={() => openPanel("canvas")}><span>▦</span><div><strong>Robot canvas</strong><small>{job?.robot_class === "tabletop_robot_arm" ? "3D assembly & joint pose" : isHumanoid ? "3D humanoid assembly" : isImageDesign ? "Image-derived robot" : "Route & prototype view"}</small></div></button>
+          <button className={`asset-button ${selectedPanel === "assembly" ? "active" : ""}`} onClick={() => openPanel("assembly")}><span>⬡</span><div><strong>CAD assembly</strong><small>Import & connect parts</small></div></button>
+          {[{ key: "design", title: "Robot design", sub: "Specification", icon: "◇", kind: "spec" }, { key: "urdf", title: "URDF model", sub: "Robot description", icon: "⌘", kind: "urdf" }, { key: "parts", title: "Parts list", sub: "Bill of materials", icon: "▤", kind: "bom" }, { key: "cad", title: "CAD source", sub: "OpenSCAD concept", icon: "⬡", kind: "cad" }, { key: "code", title: "Control software", sub: "Starter code", icon: "‹/›", kind: "code" }, { key: "validation", title: "Validation", sub: "Checks & findings", icon: "✓", kind: "report" }, { key: "simulation", title: "Simulation", sub: "Physics run", icon: "↗", kind: "sim" }].map((item) => {
             const found = job?.artifacts.find((a) => a.kind === item.kind);
-            const unavailableLabel = item.key === "simulation" && job?.robot_class === "tabletop_robot_arm" ? "Arm physics not built yet" : "Created during build";
-            return <button key={item.key} className={`asset-button ${selectedPanel === item.key ? "active" : ""} ${!found ? "unavailable" : ""}`} onClick={() => openPanel(item.key)} disabled={!found}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{found ? item.sub : unavailableLabel}</small></div>{found && <i />}</button>;
+            const unavailableLabel = item.key === "simulation" && job?.robot_class === "tabletop_robot_arm" ? "Arm physics not built yet" : item.key === "simulation" && isHumanoid ? "Humanoid physics is next" : "Created during build";
+            const sublabel = found && item.key === "simulation" && isHumanoid ? "Physics not run" : found ? item.sub : unavailableLabel;
+            return <button key={item.key} className={`asset-button ${selectedPanel === item.key ? "active" : ""} ${!found ? "unavailable" : ""}`} onClick={() => openPanel(item.key)} disabled={!found}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{sublabel}</small></div>{found && <i />}</button>;
           })}
-          <div className="agent-disclaimer"><span className="agent-orb small">✦</span><p><strong>Design generation</strong><br />{job?.robot_class === "tabletop_robot_arm" ? "Meta proposes the arm spec; local code builds and validates files." : "Rover artifacts are generated by the local demo pipeline."}</p></div>
+          <div className="agent-disclaimer"><span className="agent-orb small">✦</span><p><strong>Design generation</strong><br />{isHumanoid ? "Meta proposes the humanoid concept; local code builds and validates files." : job?.robot_class === "tabletop_robot_arm" ? "Meta proposes the arm spec; local code builds and validates files." : "Rover artifacts are generated by the local demo pipeline."}</p></div>
         </aside>
 
         <section className="studio-panel editor-panel">
-          <div className="editor-toolbar"><div><p className="eyebrow">{selectedPanel === "canvas" ? "VISUAL WORKSPACE" : "ARTIFACT INSPECTOR"}</p><h3>{({ canvas: "Robot canvas", design: "Robot design", urdf: "URDF model", parts: "Bill of materials", code: "Control software", validation: "Validation report", simulation: "Simulation results" })[selectedPanel]}</h3></div><span className="canvas-mode">{selectedPanel === "code" ? "STARTER CODE" : selectedPanel === "canvas" ? (job?.robot_class === "tabletop_robot_arm" ? "3D EDITOR" : "2D PREVIEW") : activeBody?.schema_version || "WAITING"}</span></div>
-          {selectedPanel === "canvas" ? <div className="canvas-stage job-canvas">{job?.robot_class === "tabletop_robot_arm" ? <ArmModelViewer urdf={urdfDocument?.body} initialPickTarget={visionPickTarget} /> : <RoverView sim={simulationDoc} />}</div> : activeBody ? <div className="artifact-workspace"><ArtifactViewer artifact={activeBody} /></div> : <div className="empty-state">This file appears after its workflow stage completes.</div>}
-          {selectedPanel === "canvas" && (job?.robot_class === "tabletop_robot_arm" ? <div className="canvas-specs"><div><span>Robot platform</span><strong>4-DOF tabletop arm</strong></div><div><span>Maximum reach</span><strong>{designSpec ? `${(designSpec.geometry.upper_arm_length_m + designSpec.geometry.forearm_length_m + designSpec.geometry.wrist_length_m).toFixed(2)} m` : "Generating spec"}</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_kg} kg` : "Awaiting design"}</strong></div></div> : <div className="canvas-specs"><div><span>Robot platform</span><strong>Differential-drive rover</strong></div><div><span>Route distance</span><strong>{simulationDoc ? `${Number(simulationDoc.distance_m).toFixed(1)} m` : "Awaiting simulation"}</strong></div><div><span>Evidence</span><strong>{simulationDoc?.passed ? "Route passed" : simulationDoc ? "Review findings" : "Preview only"}</strong></div></div>)}
+          <div className="editor-toolbar"><div><p className="eyebrow">{selectedPanel === "canvas" || selectedPanel === "assembly" ? "VISUAL WORKSPACE" : "ARTIFACT INSPECTOR"}</p><h3>{({ canvas: "Robot canvas", assembly: "CAD assembly", design: "Robot design", urdf: "URDF model", parts: "Bill of materials", cad: "OpenSCAD source", code: "Control software", validation: "Validation report", simulation: "Simulation results" })[selectedPanel]}</h3></div><span className="canvas-mode">{selectedPanel === "assembly" ? "LOCAL CAD IMPORT" : selectedPanel === "cad" ? "CONCEPTUAL CAD" : selectedPanel === "code" ? "STARTER CODE" : selectedPanel === "canvas" ? (job?.robot_class === "differential-drive-rover" ? "2D PREVIEW" : "3D MODEL") : activeBody?.schema_version || "WAITING"}</span></div>
+          <div style={{ display: selectedPanel === "assembly" ? "block" : "none" }}><ComponentAssemblyEditor /></div>
+          {selectedPanel !== "assembly" && (selectedPanel === "canvas" ? <div className="canvas-stage job-canvas">{job?.robot_class === "tabletop_robot_arm" ? <ArmModelViewer urdf={urdfDocument?.body} initialPickTarget={visionPickTarget} /> : isHumanoid || isImageDesign ? <UrdfModelViewer urdf={urdfDocument?.body} geometry={isHumanoid ? designSpec?.geometry : null} autoFrame={isImageDesign} /> : <RoverView sim={simulationDoc} />}</div> : activeBody ? <div className="artifact-workspace"><ArtifactViewer artifact={activeBody} /></div> : <div className="empty-state">This file appears after its workflow stage completes.</div>)}
+          {selectedPanel === "canvas" && (job?.robot_class === "tabletop_robot_arm" ? <div className="canvas-specs"><div><span>Robot platform</span><strong>4-DOF tabletop arm</strong></div><div><span>Maximum reach</span><strong>{designSpec ? `${(designSpec.geometry.upper_arm_length_m + designSpec.geometry.forearm_length_m + designSpec.geometry.wrist_length_m).toFixed(2)} m` : "Generating spec"}</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_kg} kg` : "Awaiting design"}</strong></div></div> : isHumanoid ? <div className="canvas-specs"><div><span>Robot platform</span><strong>{designSpec ? `${designSpec.height_m.toFixed(2)} m humanoid` : "Research humanoid"}</strong></div><div><span>Actuated joints</span><strong>31 body · 20 per hand</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_per_arm_kg.toFixed(1)} kg per arm` : "Awaiting design"}</strong></div></div> : <div className="canvas-specs"><div><span>Robot platform</span><strong>Differential-drive rover</strong></div><div><span>Route distance</span><strong>{simulationDoc ? `${Number(simulationDoc.distance_m).toFixed(1)} m` : "Awaiting simulation"}</strong></div><div><span>Evidence</span><strong>{simulationDoc?.passed ? "Route passed" : simulationDoc ? "Review findings" : "Preview only"}</strong></div></div>)}
         </section>
 
         <aside className="studio-panel activity-panel">
           <div className="panel-heading"><span className="agent-orb">✦</span><div><p className="eyebrow">FORGEBOT WORKFLOW</p><h3>Build activity</h3></div></div>
-          <div className="activity-state">{job ? <><StateChip state={job.state} /><span>{job.state === "awaiting_review" ? "Waiting for your approval" : job.state === "succeeded" ? (job.robot_class === "tabletop_robot_arm" ? "Design artifacts ready" : "Prototype package ready") : isFailed ? "Run stopped; inspect findings" : "Working through the design"}</span></> : <span className="muted">Loading session…</span>}</div>
-          {job?.robot_class === "tabletop_robot_arm" && <p className="model-attribution">Generated with {job.provider} · {job.model}</p>}
+          <div className="activity-state">{job ? <><StateChip state={job.state} /><span>{job.state === "awaiting_review" ? "Waiting for your approval" : job.state === "succeeded" ? (job.robot_class === "differential-drive-rover" ? "Prototype package ready" : "Design artifacts ready") : isFailed ? "Run stopped; inspect findings" : "Working through the design"}</span></> : <span className="muted">Loading session…</span>}</div>
+          {job?.provider === "meta-model-api" && <p className="model-attribution">Generated with {job.provider} · {job.model}</p>}
           <ol className="workflow-steps">{workflowSteps.map((step, i) => {
             const complete = job?.state === "succeeded" || progressIndex > i;
-            const active = job?.state === step.state;
+            const active = job?.state === step.state && job.state !== "succeeded";
             return <li key={step.state} className={`${complete ? "complete" : ""} ${active ? "current" : ""}`}><span className="workflow-marker">{complete ? "✓" : active ? "•" : String(i + 1).padStart(2, "0")}</span><div><strong>{step.label}</strong>{active && <small>{job.state === "awaiting_review" ? "Your review is needed" : "In progress"}</small>}</div></li>;
           })}</ol>
           <div className="activity-log"><h4>Run events</h4>{events.length === 0 ? <p className="muted">Waiting for workflow events…</p> : events.slice(-5).reverse().map((event) => <div className="activity-event" key={event.id}><span className="event-mark" /><div><strong>{event.state.replace(/_/g, " ")}</strong><small>{new Date(event.created_at).toLocaleTimeString()}</small></div></div>)}</div>
-          <p className="panel-footnote">{job?.robot_class === "tabletop_robot_arm" ? "Arm motion is a kinematic preview with a simplified tabletop clearance gate. No physics, complete collision checks, or hardware safety approval." : "Simulation results are estimates for review, not hardware safety approval."}</p>
+          <p className="panel-footnote">{isHumanoid ? "Humanoid assembly is a neutral-pose kinematic preview. Balance, gait physics, full collision checks, and hardware safety approval are not implemented." : job?.robot_class === "tabletop_robot_arm" ? "Arm motion is a kinematic preview with a simplified tabletop clearance gate. No physics, complete collision checks, or hardware safety approval." : "Simulation results are estimates for review, not hardware safety approval."}</p>
         </aside>
       </div>
     </section>

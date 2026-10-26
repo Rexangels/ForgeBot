@@ -83,11 +83,9 @@ def get_job(request, job_id: int):
         for a in job.artifacts.all()
     ]
     mission_artifact = job.artifacts.filter(kind="mission").first()
-    robot_class = (
-        "tabletop_robot_arm"
-        if job.provider == settings.MODEL_API_PROVIDER
-        else "differential-drive-rover"
-    )
+    robot_class = "differential-drive-rover"
+    if job.provider == settings.MODEL_API_PROVIDER:
+        robot_class = "tabletop_robot_arm"
     if mission_artifact:
         try:
             robot_class = json.loads(mission_artifact.body).get("robot_class", robot_class)
@@ -196,6 +194,51 @@ def analyze_scene(request):
     return JsonResponse({"provider": settings.MODEL_API_PROVIDER, "model": settings.MODEL_API_NAME, "observation": result})
 
 
+@require_POST
+def create_image_design(request, project_id: int):
+    """Queue image-guided robot concept generation without retaining the image."""
+    from .image_design import _num
+    from .vision import _image_format_allowed
+    from .image_design_worker import start_image_design
+
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    project = _project_owned(request, project_id)
+    image_file = request.FILES.get("image")
+    if image_file is None:
+        return JsonResponse({"error": "Choose a robot reference image first."}, status=400)
+    if not upload_size_ok(image_file.size):
+        return JsonResponse({"error": f"Image must be no larger than {settings.FORGEBOT_MAX_UPLOAD_MB:g} MB."}, status=413)
+    image = image_file.read()
+    content_type = image_file.content_type or ""
+    if not _image_format_allowed(content_type, image):
+        return JsonResponse({"error": "Upload a valid JPEG, PNG, or WebP reference image."}, status=400)
+    brief = (request.POST.get("brief") or "").strip()
+    constraints = (request.POST.get("constraints") or "").strip()
+    if not brief or len(brief) > 2000 or len(constraints) > 2000:
+        return JsonResponse({"error": "Add a design brief (up to 2,000 characters) and keep constraints under 2,000 characters."}, status=400)
+    try:
+        height = _num(float(request.POST.get("target_height_m", "")), "Target height", 0.05, 3.0)
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "Target height must be between 0.05 m and 3 m."}, status=400)
+    key = (request.POST.get("idempotency_key") or "").strip()
+    if not key:
+        return JsonResponse({"error": "idempotency_key is required."}, status=400)
+    mission = {"robot_class": "image_robot_design", "brief": brief, "target_height_m": height, "constraints": constraints}
+    job, created = Job.objects.get_or_create(
+        project=project,
+        idempotency_key=key,
+        defaults={"provider": settings.MODEL_API_PROVIDER, "model": settings.MODEL_API_NAME},
+    )
+    if not created:
+        return JsonResponse({"id": job.id, "state": job.state, "created": False}, status=200)
+    store_artifact(job, "mission", json.dumps(mission, indent=2), "mission/v1")
+    JobEvent.objects.create(job=job, state=job.state, detail={"stage": "queued", "message": "Waiting to design a robot concept from the reference image."})
+    start_image_design(job.id, image, content_type, brief, height, constraints)
+    return JsonResponse({"id": job.id, "state": states.QUEUED, "created": True}, status=202)
+
+
 @require_GET
 def list_projects(request):
     denied = _forbidden(request)
@@ -247,21 +290,25 @@ def create_demo_job(request, project_id: int):
         idempotency_key=key,
         defaults={
             "input_revision": str(payload.get("input_revision", "rev-1")),
-            "provider": settings.MODEL_API_PROVIDER if robot_class == "tabletop_robot_arm" else "local-demo",
-            "model": settings.MODEL_API_NAME if robot_class == "tabletop_robot_arm" else "deterministic-rover-v1",
+            "provider": settings.MODEL_API_PROVIDER if robot_class in ("tabletop_robot_arm", "research_humanoid") else "local-demo",
+            "model": settings.MODEL_API_NAME if robot_class in ("tabletop_robot_arm", "research_humanoid") else "deterministic-rover-v1",
         },
     )
     if not created:
         return JsonResponse({"id": job.id, "state": job.state, "created": False})
-    if robot_class == "tabletop_robot_arm":
-        from .arm_worker import start_arm_proposal
+    # Make the selected platform available to the first workbench poll, before
+    # the local proposal worker starts writing the same immutable mission.
+    mission_record = {**(mission if isinstance(mission, dict) else {}), "robot_class": robot_class}
+    store_artifact(job, "mission", json.dumps(mission_record, indent=2), "mission/v1")
+    if robot_class in ("tabletop_robot_arm", "research_humanoid"):
+        from .arm_worker import start_design_proposal
 
         JobEvent.objects.create(
             job=job,
             state=job.state,
-            detail={"stage": "queued", "message": "Waiting to generate the arm proposal."},
+            detail={"stage": "queued", "message": "Waiting to generate the robot design proposal."},
         )
-        start_arm_proposal(job.id, mission)
+        start_design_proposal(job.id, mission, robot_class)
         return JsonResponse(
             {"id": job.id, "state": states.QUEUED, "created": True}, status=202
         )

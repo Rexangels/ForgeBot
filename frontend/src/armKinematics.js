@@ -40,6 +40,7 @@ export function parseRobotUrdf(urdfText) {
         name: visual.getAttribute("name") || "",
         origin: vector(origin?.getAttribute("xyz")),
         rpy: vector(origin?.getAttribute("rpy")),
+        color: (() => { const rgba = visual.querySelector("material color")?.getAttribute("rgba"); if (!rgba) return null; const channels = rgba.trim().split(/\s+/).slice(0, 3).map(Number); if (channels.length !== 3 || channels.some((part) => !Number.isFinite(part))) return null; return `#${channels.map((part) => Math.max(0, Math.min(255, Math.round(part * 255))).toString(16).padStart(2, "0")).join("")}`; })(),
         type: shape.tagName,
         attributes,
       };
@@ -176,7 +177,8 @@ export function solveArmTarget(arm, target) {
   const yaw = Math.atan2(target.y, target.x);
   const vertical = target.z - arm.shoulderZ;
   const [upper, forearm, wrist] = arm.lengths;
-  // Keep the tool mount horizontal for this first 4-axis position solver.
+  // Solve the first two links to the wrist center, then counter-rotate the
+  // wrist so the tool mount stays horizontal in the workcell frame.
   const wristX = radial - wrist;
   const distanceSquared = wristX * wristX + vertical * vertical;
   const cosine = (distanceSquared - upper * upper - forearm * forearm) / (2 * upper * forearm);
@@ -185,7 +187,12 @@ export function solveArmTarget(arm, target) {
   const candidates = [elbowMagnitude, -elbowMagnitude].map((elbowPlanar) => {
     const shoulderPlanar = Math.atan2(vertical, wristX)
       - Math.atan2(forearm * Math.sin(elbowPlanar), upper + forearm * Math.cos(elbowPlanar));
-    return { base_yaw: yaw, shoulder_pitch: -shoulderPlanar, elbow_pitch: -elbowPlanar, wrist_pitch: 0 };
+    return {
+      base_yaw: yaw,
+      shoulder_pitch: -shoulderPlanar,
+      elbow_pitch: -elbowPlanar,
+      wrist_pitch: shoulderPlanar + elbowPlanar,
+    };
   });
   const reasons = [];
   for (const angles of candidates) {

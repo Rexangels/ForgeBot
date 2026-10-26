@@ -58,4 +58,17 @@ export const api = {
     if (!res.ok) throw new Error(data?.error || `request failed (${res.status})`);
     return data;
   },
+  createImageDesign: async (projectId, imageFile, { brief, targetHeightM, constraints }) => {
+    const headers = { "X-CSRFToken": getCookie("csrftoken") };
+    const form = new FormData();
+    form.append("image", imageFile);
+    form.append("brief", brief);
+    form.append("target_height_m", String(targetHeightM));
+    form.append("constraints", constraints);
+    form.append("idempotency_key", crypto.randomUUID());
+    const res = await fetch(`/api/v1/projects/${projectId}/image-design`, { method: "POST", headers, credentials: "include", body: form });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || `request failed (${res.status})`);
+    return data;
+  },
 };

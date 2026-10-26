@@ -36,6 +36,9 @@ export function ArtifactViewer({ artifact }) {
     );
   }
   if (artifact.kind === "sim" && doc) {
+    if (doc.status === "not_run") {
+      return <div><h3>Simulation not run</h3><p>{doc.reason || "A physics simulation is not available for this concept."}</p></div>;
+    }
     return (
       <div>
         <h3>Simulation result (simulated)</h3>
@@ -68,6 +71,7 @@ export function ArtifactViewer({ artifact }) {
       <h3>
         {artifact.kind} <span className="muted">{artifact.schema_version}</span>
       </h3>
+      {artifact.kind === "cad" && <p><a className="artifact-download" href={`data:text/plain;charset=utf-8,${encodeURIComponent(artifact.body)}`} download="forgebot-image-concept.scad">Download OpenSCAD source</a><span className="muted"> · Open this concept file in OpenSCAD to preview or export a mesh.</span></p>}
       <pre className="artifact-body">{artifact.body}</pre>
     </div>
   );

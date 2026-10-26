@@ -151,6 +151,14 @@ function numberPoint(point, key, value) {
   return { ...point, [key]: Number(value) };
 }
 
+function reachableHeight(arm, target, offsets) {
+  for (const offset of offsets) {
+    const point = { ...target, z: target.z + offset };
+    if (solveArmTarget(arm, point).reachable) return point;
+  }
+  return { ...target };
+}
+
 export default function ArmModelViewer({ urdf, initialPickTarget = null }) {
   const mountRef = useRef(null);
   const sceneNodes = useRef(null);
@@ -285,8 +293,8 @@ export default function ArmModelViewer({ urdf, initialPickTarget = null }) {
   useEffect(() => {
     if (!sceneNodes.current || !parsed?.arm) return;
     applyJointPose(sceneNodes.current.built.jointFrames, angles);
-    const pickYaw = pickSolution?.angles.base_yaw || 0;
-    const placeYaw = placeSolution?.angles.base_yaw || 0;
+    const pickYaw = pickSolution?.angles?.base_yaw || 0;
+    const placeYaw = placeSolution?.angles?.base_yaw || 0;
     sceneNodes.current.objects.pickObject.position.set(pick.x + 0.045 * Math.cos(pickYaw), pick.y + 0.045 * Math.sin(pickYaw), 0.02);
     sceneNodes.current.objects.destination.position.set(place.x + 0.045 * Math.cos(placeYaw), place.y + 0.045 * Math.sin(placeYaw), 0);
     sceneNodes.current.targetMarker.position.set(...Object.values(forwardArmKinematics(parsed.arm, angles)));
@@ -304,15 +312,19 @@ export default function ArmModelViewer({ urdf, initialPickTarget = null }) {
       setError("Choose reachable pick and place targets within the generated URDF joint limits.");
       return;
     }
+    const approachPick = reachableHeight(arm, pick, [0.08, 0.06, 0.04, 0.02, 0]);
+    const liftPick = reachableHeight(arm, pick, [0.12, 0.10, 0.08, 0.06, 0.04, 0.02, 0]);
+    const approachPlace = reachableHeight(arm, place, [0.08, 0.06, 0.04, 0.02, 0]);
+    const retreatPlace = reachableHeight(arm, place, [0.12, 0.10, 0.08, 0.06, 0.04, 0.02, 0]);
     const specifications = [
-      { point: { ...pick, z: pick.z + 0.08 }, closed: false, label: "Approach pick" },
+      { point: approachPick, closed: false, label: "Approach pick" },
       { point: pick, closed: false, label: "Align with object" },
       { point: pick, closed: true, label: "Close gripper" },
-      { point: { ...pick, z: pick.z + 0.12 }, closed: true, label: "Lift" },
-      { point: { ...place, z: place.z + 0.08 }, closed: true, label: "Transfer" },
+      { point: liftPick, closed: true, label: "Lift" },
+      { point: approachPlace, closed: true, label: "Transfer" },
       { point: place, closed: true, label: "Lower" },
       { point: place, closed: false, label: "Release" },
-      { point: { ...place, z: place.z + 0.12 }, closed: false, label: "Retreat" },
+      { point: retreatPlace, closed: false, label: "Retreat" },
     ];
     const frames = [];
     let prior = angleRef.current;

@@ -11,11 +11,14 @@ ForgeBot helps an engineer turn a robotics mission brief into a reviewable, simu
 - React and Three.js provide a URDF-driven tabletop-arm assembly viewer for generated box/cylinder/sphere visuals, joint transforms and limits, plus orbit and joint-pose controls. A four-axis analytic FK/IK layer maps target positions to joint poses. The pick-and-place preview interpolates motion with URDF velocity bounds and checks sampled centerlines against the configured work surface. This is not a physics simulator, full collision checker, or parametric solid-CAD editor.
 - Django reads the Meta Model API key server-side from `FORGEBOT_MODEL_API_KEY`, `META_API`, or `MODEL_API_KEY`. The current local configuration uses the `META_API` alias. The provider endpoint defaults to `https://api.meta.ai/v1`, and the model defaults to `muse-spark-1.3`.
 - A Meta structured-output request proposes a constrained tabletop 4-DOF arm specification and unverified BOM. The user reviews it before local code generates the URDF and starter-control scaffold.
-- Deterministic semantic, URDF, and static-code checks run before the arm design artifacts are marked ready. Arm physics simulation and hardware execution are not implemented.
+- A second Meta-backed path proposes a constrained research humanoid. Local code creates a 31-DOF body topology, two 20-DOF hand topologies, primitive-geometry URDF, fixed sensor frames, and a reviewable joint interface. React renders the URDF in a neutral-pose orbit viewer. This is an original template inspired by public humanoid capabilities; it does not reproduce Agile ONE SN internals.
+- Deterministic semantic, URDF, and static-code checks run before design artifacts are marked ready. Arm and humanoid physics simulation and hardware execution are not implemented. Humanoid inertias and joint effort/velocity limits are provisional template values, not suitable evidence for dynamics or hardware.
 - An authenticated, user-triggered still-image workflow sends a selected workcell image to Meta for structured scene understanding: summary, visible object appearance/state, image-relative regions, relationships, uncertainty, and visible cautions. ForgeBot does not retain the image or response in this first pass.
+- An image-to-robot concept path accepts the selected reference image plus a task brief and approximate height supplied by the user. Meta proposes a validated 3–12 node primitive component tree; after human approval Django generates URDF visualization geometry and downloadable OpenSCAD source locally. This produces an image-inspired concept, not recovered CAD. The reference bytes are passed in memory to Meta and are not stored in the database or artifact package.
+- The image-design workflow runs in the same prototype in-process thread model as arm/humanoid generation. It validates tree structure, identifiers, primitive dimensions, and URDF connectivity. It does not calculate mass properties, joints/actuators, material strength, tolerance stackups, or physics. The visual model and OpenSCAD source must be treated as conceptual geometry.
 - A four-corner planar homography can map a selected object's lower bounding-box center into the configured arm/table frame. The user reviews and edits the resulting XYZ target before passing it into the arm planner. This assumes a planar work surface, the documented table dimensions and arm-base frame, and no depth measurement.
 - Model vision is observational, and homography-mapped object locations remain estimates. There is no depth camera, object tracking across frames, grasp verification, dynamics, or hardware motion authorization.
-- Arm proposal generation currently runs in a local development thread so the UI can poll job events. Replace this with a durable queue before production. Rover generation and its deterministic waypoint check remain a separate demo path.
+- Model-backed arm and humanoid proposal generation currently runs in a local development thread so the UI can poll job events. Replace this with a durable queue before production. Rover generation and its deterministic waypoint check remain a separate demo path.
 
 The API key must remain in the ignored `backend/.env` or a deployment secret manager. Never send it to React, include it in artifacts, or commit it.
 
@@ -162,7 +165,9 @@ Track job success/failure and cancellation rates, queue age, stage latency, mode
 
 ### Phase 2 — simulation and review
 
-- Select and integrate a physics engine in an isolated worker.
+- Evaluate an Isaac Sim/Isaac Lab URDF import path against local GPU, operating-system, and licensing/deployment constraints; select and integrate the physics engine in an isolated worker.
+- Import the humanoid URDF, replace provisional inertias and actuator values with documented simulation parameters, and add ground/contact/self-collision configuration.
+- Define repeatable humanoid checks: stable stand, 1 m controlled walk, and a two-arm reach/grasp/place task. Record engine/version, timestep, environment, controller, collisions, and success per run.
 - Record simulation configuration and expose reproducible reports and failure states.
 - Add user review/approval of assumptions and BOM before expensive or downstream stages.
 - Add the export manifest, provenance, quotas, audit events, and operational dashboards.
@@ -170,6 +175,8 @@ Track job success/failure and cancellation rates, queue age, stage latency, mode
 
 ### Phase 3 — broader robotics support
 
+- Replace the class-specific conditionals with a platform registry and a common capability/schema contract for new robot types.
+- Add editable parametric component geometry and CAD interchange exports; keep URDF and solid-CAD provenance linked.
 - Add optional sketch analysis with confidence and user confirmation.
 - Expand supported robot classes, sensor models, and ROS 2 outputs behind capability checks.
 - Add regression fixtures for schemas, URDF edge cases, and simulation scenarios.
@@ -178,6 +185,22 @@ Track job success/failure and cancellation rates, queue age, stage latency, mode
 ## 10. Decisions still required
 
 - Which physics engine and robot-description subset will be supported first?
+
+### CAD and component assembly direction
+
+FreeCAD is the recommended first desktop CAD integration because it is open-source and can run locally without a hosted account. ForgeBot should not depend on controlling FreeCAD's GUI. The first integration should use explicit file exchange: import a robot component's visual mesh (GLB/glTF or STL) into the browser; keep a versioned component manifest with units, mass properties, and named mounting frames; and retain STEP as the preferred solid-CAD exchange format for later CAD-kernel checks. Blender is useful for visual mesh authoring and GLB export, while FreeCAD is the better fit for dimensioned parts, constrained assemblies, and STEP exchange.
+
+The component contract should distinguish:
+
+- `visual`: mesh URI/hash, source application, units, and local visual transform;
+- `physical`: mass, center of mass, and inertia with provenance or an explicit unknown state;
+- `mounts`: named frames with pose, bolt/interface pattern, and compatibility key;
+- `assembly`: parent component/frame, child component/frame, and relative transform;
+- `kinematics`: optional joint type, axis, limits, and actuator reference used to generate URDF/MJCF.
+
+The browser can validate manifest structure, units, frame references, and approximate mesh bounding-box overlap. A CAD kernel must perform solid geometry, fastener, tolerance, and interference checks; a physics simulator must perform contact and motion checks. Never label a mesh-only bounding-box pass as manufacturing fit. Imported files should be size/type limited, parsed in a constrained worker, and linked to immutable hashes. A later exporter can produce URDF visuals and simulator assets from the same assembly graph while preserving links back to source STEP and mesh files.
+
+First acceptance slice: import two local component meshes, declare one named mount frame on each, attach one component to the other with a rigid transform, show the assembly in the canvas, and report missing frames, unit mismatches, or coarse bounding-box intersections. Export the manifest and a URDF-compatible visual assembly. This does not yet claim editable parametric CAD or manufacturing validation.
 - Which model providers are available, and what data may be sent to them? If using a local model, which supported model and hardware target will be used?
 - What are the authentication, retention, budget, and export requirements for the MVP?
 - Which cloud target, if any, will be used when the local demo moves beyond one developer machine?

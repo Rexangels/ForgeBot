@@ -11,7 +11,11 @@ BOM_SCHEMA_VERSION = "bom/v1"
 
 MISSION_REQUIRED = ("task", "units", "environment")
 SPEC_REQUIRED = ("robot_class", "links", "joints", "assumptions")
-SUPPORTED_ROBOT_CLASSES = ("differential-drive-rover", "tabletop_robot_arm")
+SUPPORTED_ROBOT_CLASSES = (
+    "differential-drive-rover",
+    "tabletop_robot_arm",
+    "research_humanoid",
+)
 
 
 def validate_mission(payload: dict) -> list[str]:
