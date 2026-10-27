@@ -43,7 +43,9 @@ function buildAssembly(model, scene) {
       visualFrame.position.set(...visual.origin);
       visualFrame.quaternion.copy(rpyQuaternion(visual.rpy));
       const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-          color: visual.color || visualColor(name), roughness: 0.62, metalness: 0.06,
+        color: visual.color || visualColor(name), roughness: 0.62, metalness: 0.06,
+        transparent: (visual.opacity ?? 1) < 1, opacity: visual.opacity ?? 1,
+        depthWrite: (visual.opacity ?? 1) >= 1,
       }));
       if (visual.type === "cylinder") mesh.rotation.x = Math.PI / 2;
       mesh.castShadow = true;
@@ -66,7 +68,7 @@ function buildAssembly(model, scene) {
   return root;
 }
 
-export default function UrdfModelViewer({ urdf, geometry = null, autoFrame = false }) {
+export default function UrdfModelViewer({ urdf, geometry = null, autoFrame = false, componentCount = null }) {
   const mountRef = useRef(null);
   const [renderError, setRenderError] = useState("");
   const parsed = useMemo(() => {
@@ -184,7 +186,7 @@ export default function UrdfModelViewer({ urdf, geometry = null, autoFrame = fal
       </div>
       <div className="humanoid-model-caption">
         <span>{autoFrame ? "Primitive geometry concept from image" : "Neutral kinematic pose"}</span>
-        <span>{parsed.links.size} links · {actuatedJoints} actuated joints</span>
+        <span>{autoFrame ? `${componentCount ?? Math.max(0, parsed.links.size - 1)} concept parts · fixed assembly` : `${parsed.links.size} links · ${actuatedJoints} actuated joints`}</span>
         <small>{autoFrame ? "Estimated concept · not manufacturing CAD or physics" : "Visualization only · no balance or physics simulation yet"}</small>
       </div>
     </div>

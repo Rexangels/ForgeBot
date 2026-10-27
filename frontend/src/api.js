@@ -48,6 +48,15 @@ export const api = {
   events: (jobId, afterId) =>
     req("GET", `/api/v1/jobs/${jobId}/events?after_id=${afterId}`),
   approve: (jobId) => req("POST", `/api/v1/jobs/${jobId}/approve`, {}),
+  rebuildCad: (jobId) => req("POST", `/api/v1/jobs/${jobId}/rebuild-cad`, {}),
+  simulateArm: (jobId, { trainController = false, pickTargetM, placeTargetM } = {}) => req("POST", `/api/v1/jobs/${jobId}/simulate-arm`, { train_controller: trainController, ...(pickTargetM ? { pick_target_m: pickTargetM } : {}), ...(placeTargetM ? { place_target_m: placeTargetM } : {}) }),
+  benchmarkArmDesigns: (jobId) => req("POST", `/api/v1/jobs/${jobId}/benchmark-arm-designs`, {}),
+  armSimulationDefaults: (jobId) => req("GET", `/api/v1/jobs/${jobId}/arm-simulation-defaults`),
+  proposeArmRepair: (jobId) => req("POST", `/api/v1/jobs/${jobId}/propose-arm-repair`, {}),
+  applyArmRepair: (jobId, proposal) => req("POST", `/api/v1/jobs/${jobId}/apply-arm-repair`, proposal),
+  editCadSketches: (jobId, components) => req("POST", `/api/v1/jobs/${jobId}/edit-cad-sketches`, { components }),
+  proposeCadSketchEdit: (jobId, componentId, instruction) => req("POST", `/api/v1/jobs/${jobId}/propose-cad-sketch-edit`, { component_id: componentId, instruction }),
+  inspectComponent: (jobId, componentId, question = "") => req("POST", `/api/v1/jobs/${jobId}/inspect-component`, { component_id: componentId, question }),
   artifact: (artifactId) => req("GET", `/api/v1/artifacts/${artifactId}`),
   analyzeScene: async (imageFile) => {
     const headers = { "X-CSRFToken": getCookie("csrftoken") };

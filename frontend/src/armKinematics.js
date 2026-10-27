@@ -41,6 +41,7 @@ export function parseRobotUrdf(urdfText) {
         origin: vector(origin?.getAttribute("xyz")),
         rpy: vector(origin?.getAttribute("rpy")),
         color: (() => { const rgba = visual.querySelector("material color")?.getAttribute("rgba"); if (!rgba) return null; const channels = rgba.trim().split(/\s+/).slice(0, 3).map(Number); if (channels.length !== 3 || channels.some((part) => !Number.isFinite(part))) return null; return `#${channels.map((part) => Math.max(0, Math.min(255, Math.round(part * 255))).toString(16).padStart(2, "0")).join("")}`; })(),
+        opacity: (() => { const channels = visual.querySelector("material color")?.getAttribute("rgba")?.trim().split(/\s+/).map(Number); return channels?.length === 4 && Number.isFinite(channels[3]) ? Math.max(0, Math.min(1, channels[3])) : 1; })(),
         type: shape.tagName,
         attributes,
       };

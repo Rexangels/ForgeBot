@@ -80,7 +80,7 @@ def get_job(request, job_id: int):
     job = get_object_or_404(Job, id=job_id, project__owner=request.user)
     artifacts = [
         {"id": a.id, "kind": a.kind, "schema_version": a.schema_version}
-        for a in job.artifacts.all()
+        for a in job.artifacts.order_by("-id")
     ]
     mission_artifact = job.artifacts.filter(kind="mission").first()
     robot_class = "differential-drive-rover"
@@ -335,6 +335,370 @@ def approve_job(request, job_id: int):
     summary = run_from_approval(job)
     job.refresh_from_db()
     return JsonResponse({"id": job.id, "state": job.state, "summary": summary})
+
+
+@require_POST
+def rebuild_cad_package(request, job_id: int):
+    """Rebuild an image-design CAD package from its saved, reviewed specification."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This design has no saved specification to rebuild from."}, status=409)
+    try:
+        spec = json.loads(spec_artifact.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "The saved design specification is invalid."}, status=409)
+    if not isinstance(spec, dict) or spec.get("robot_class") != "image_robot_design":
+        return JsonResponse({"error": "CAD package rebuild is available for image-guided robot designs."}, status=409)
+
+    from .image_design import generate_cad_package
+    from .freecad_export import FreeCADError, run_freecad_export
+
+    package = generate_cad_package(spec)
+    cad_artifact = store_artifact(job, "cad", json.dumps(package, indent=2), "forgebot-cad-package/v4")
+    try:
+        freecad_result = run_freecad_export(job.id, package)
+    except FreeCADError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+    freecad_artifact = store_artifact(job, "cad_export", json.dumps(freecad_result, indent=2), "forgebot-freecad-export/v1")
+    validation = json.loads(package["files"]["assembly_validation.json"])
+    return JsonResponse({
+        "artifact_id": cad_artifact.id,
+        "freecad_artifact_id": freecad_artifact.id,
+        "freecad_status": freecad_result["status"],
+        "schema_version": cad_artifact.schema_version,
+        "validation": {"status": validation.get("status"), "finding_count": len(validation.get("findings", []))},
+    })
+
+
+@require_POST
+def inspect_design_component(request, job_id: int):
+    """Ask Meta to explain a component using only the saved structured robot model."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This design has no saved specification."}, status=409)
+    try:
+        payload = json.loads(request.body or b"{}")
+        spec = json.loads(spec_artifact.body)
+        if spec.get("robot_class") != "image_robot_design":
+            return JsonResponse({"error": "Component questions are currently available for image-guided designs."}, status=409)
+        from .image_design import explain_design_component
+        answer = explain_design_component(spec, payload.get("component_id"), payload.get("question", ""))
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return JsonResponse({"error": "Request body must be a JSON object."}, status=400)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Exception as exc:
+        from .meta_model import MetaModelError
+        if isinstance(exc, MetaModelError):
+            return JsonResponse({"error": str(exc)}, status=502)
+        raise
+    return JsonResponse(answer)
+
+
+@require_POST
+def propose_cad_sketch_edit(request, job_id: int):
+    """Ask the configured model to propose a bounded, reviewable sketch edit."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This design has no saved specification."}, status=409)
+    try:
+        payload = json.loads(request.body or b"{}")
+        spec = json.loads(spec_artifact.body)
+        if spec.get("robot_class") != "image_robot_design":
+            return JsonResponse({"error": "AI sketch proposals are currently available for image-guided robot designs."}, status=409)
+        from .image_design import propose_component_sketch_edit
+        component_id = payload.get("component_id")
+        kernel_findings = []
+        export_artifact = job.artifacts.filter(kind="cad_export").order_by("-id").first()
+        if export_artifact is not None:
+            try:
+                export_doc = json.loads(export_artifact.body)
+                validation = export_doc.get("export_report", {}).get("solid_kernel_validation", {})
+                kernel_findings = [item for item in validation.get("intersections", []) if component_id in item.get("component_ids", [])]
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                kernel_findings = []
+        proposal = propose_component_sketch_edit(spec, component_id, payload.get("instruction"), kernel_findings)
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return JsonResponse({"error": "Request body must be a JSON object."}, status=400)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Exception as exc:
+        from .meta_model import MetaModelError
+        if isinstance(exc, MetaModelError):
+            return JsonResponse({"error": str(exc)}, status=502)
+        raise
+    return JsonResponse(proposal)
+
+
+@require_POST
+def edit_cad_sketches(request, job_id: int):
+    """Save reviewed component envelope edits and rebuild their FreeCAD sketches."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This design has no saved specification."}, status=409)
+    try:
+        payload = json.loads(request.body or b"{}")
+        edits = payload.get("components")
+        if not isinstance(edits, list) or not edits:
+            raise ValueError("Provide one or more component dimension edits.")
+        spec = json.loads(spec_artifact.body)
+        if spec.get("robot_class") != "image_robot_design":
+            return JsonResponse({"error": "Sketch editing is currently available for image-guided robot designs."}, status=409)
+        components = {component["id"]: component for component in spec.get("components", [])}
+        for edit in edits:
+            component_id = edit.get("id")
+            dimensions = edit.get("dimensions_m")
+            if component_id not in components or not isinstance(dimensions, list) or len(dimensions) != 3:
+                raise ValueError("Each edit must identify a known component and provide width, depth, and height.")
+            values = [float(value) for value in dimensions]
+            if any(not (0.005 <= value <= 5.0) for value in values):
+                raise ValueError("Sketch dimensions must be between 5 mm and 5 m.")
+            if components[component_id]["geometry"] == "cylinder":
+                diameter = (values[0] + values[1]) / 2
+                values = [diameter, diameter, values[2]]
+            elif components[component_id]["geometry"] == "sphere":
+                values = [values[0], values[0], values[0]]
+            components[component_id]["dimensions_m"] = values
+        spec.setdefault("design_history", []).append({"action": "component_envelope_edited", "component_ids": [item["id"] for item in edits]})
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    from .image_design import generate_cad_package, generate_image_robot_urdf
+    from .freecad_export import FreeCADError, run_freecad_export
+
+    package = generate_cad_package(spec)
+    try:
+        freecad_result = run_freecad_export(job.id, package)
+    except FreeCADError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+    spec_artifact = store_artifact(job, "spec", json.dumps(spec, indent=2), spec_artifact.schema_version)
+    urdf_artifact = store_artifact(job, "urdf", generate_image_robot_urdf(spec), "urdf/v1")
+    cad_artifact = store_artifact(job, "cad", json.dumps(package, indent=2), "forgebot-cad-package/v4")
+    freecad_artifact = store_artifact(job, "cad_export", json.dumps(freecad_result, indent=2), "forgebot-freecad-export/v1")
+    JobEvent.objects.create(job=job, state=job.state, detail={"stage": "sketch_edit", "status": "completed", "component_ids": [item["id"] for item in edits]})
+    return JsonResponse({
+        "spec_artifact_id": spec_artifact.id,
+        "urdf_artifact_id": urdf_artifact.id,
+        "artifact_id": cad_artifact.id,
+        "freecad_artifact_id": freecad_artifact.id,
+        "freecad_status": freecad_result["status"],
+        "freecad_version": freecad_result.get("freecad_version"),
+    })
+
+
+@require_POST
+def simulate_tabletop_arm(request, job_id: int):
+    """Run and persist the reproducible MuJoCo tabletop-arm task."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    if job.state != states.SUCCEEDED:
+        return JsonResponse({"error": "Approve and build the robot package before simulation."}, status=409)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This design has no saved specification."}, status=409)
+    try:
+        payload = json.loads(request.body or b"{}")
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object.")
+        spec = json.loads(spec_artifact.body)
+        if spec.get("robot_class") != "tabletop_robot_arm":
+            return JsonResponse({"error": "Physics simulation is currently available for tabletop arms."}, status=409)
+        train = payload.get("train_controller", False)
+        if not isinstance(train, bool):
+            raise ValueError("train_controller must be true or false.")
+        from .arm_simulation import run_arm_simulation
+        result = run_arm_simulation(
+            spec,
+            pick_target=payload.get("pick_target_m"),
+            place_target=payload.get("place_target_m"),
+            train=train,
+        )
+        result["spec_artifact_id"] = spec_artifact.id
+    except Exception as exc:
+        from .arm_simulation import ArmSimulationError
+        if isinstance(exc, ArmSimulationError):
+            return JsonResponse({"error": str(exc)}, status=422)
+        if isinstance(exc, (json.JSONDecodeError, TypeError, ValueError)):
+            return JsonResponse({"error": str(exc)}, status=400)
+        raise
+    artifact = store_artifact(job, "sim", json.dumps(result, indent=2), "sim/mujoco-arm/v1")
+    JobEvent.objects.create(job=job, state=job.state, detail={"stage": "physics_simulation", "artifact_id": artifact.id, "passed": result["passed"]})
+    return JsonResponse({"artifact_id": artifact.id, "schema_version": artifact.schema_version, "passed": result["passed"], "engine": result["engine"], "engine_version": result["engine_version"]})
+
+
+@require_POST
+def benchmark_project_arm_designs(request, job_id: int):
+    """Run the same deterministic pick/place acceptance task on recent project arms."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    if job.state != states.SUCCEEDED:
+        return JsonResponse({"error": "Approve and build the robot package before benchmarking."}, status=409)
+    candidates = list(job.project.jobs.filter(state=states.SUCCEEDED).order_by("-updated_at")[:8])
+    if job not in candidates:
+        candidates = [job, *candidates[:7]]
+    results = []
+    for candidate in candidates:
+        spec_artifact = candidate.artifacts.filter(kind="spec").order_by("-id").first()
+        if spec_artifact is None:
+            continue
+        try:
+            spec = json.loads(spec_artifact.body)
+            if spec.get("robot_class") != "tabletop_robot_arm":
+                continue
+            from .arm_simulation import run_arm_simulation
+            simulation = run_arm_simulation(spec)
+            results.append({
+                "job_id": candidate.id,
+                "design_name": spec.get("name") or f"Arm design #{candidate.id}",
+                "spec_artifact_id": spec_artifact.id,
+                "passed": simulation["passed"],
+                "task": simulation["task"],
+                "acceptance_checks": simulation["acceptance_checks"],
+                "failure_reasons": simulation["failure_reasons"],
+                "metrics": simulation["metrics"],
+            })
+        except Exception as exc:
+            results.append({"job_id": candidate.id, "design_name": f"Arm design #{candidate.id}", "passed": False, "failure_reasons": [str(exc)], "acceptance_checks": {}})
+    if not results:
+        return JsonResponse({"error": "No approved tabletop-arm designs were found in this project."}, status=409)
+    record = {
+        "schema_version": "forgebot-arm-benchmark/v1",
+        "benchmark": "same default tabletop pick-and-place acceptance task",
+        "design_count": len(results),
+        "passed_count": sum(1 for result in results if result["passed"]),
+        "results": results,
+        "limits": ["Only the eight most recently updated successful project jobs are considered.", "Primitive geometry and estimated inertias are used; the benchmark is not hardware qualification."],
+    }
+    artifact = store_artifact(job, "sim_benchmark", json.dumps(record, indent=2), record["schema_version"])
+    JobEvent.objects.create(job=job, state=job.state, detail={"stage": "arm_design_benchmark", "artifact_id": artifact.id, "design_count": len(results), "passed_count": record["passed_count"]})
+    return JsonResponse({"artifact_id": artifact.id, "benchmark": record})
+
+
+@require_GET
+def tabletop_arm_simulation_defaults(request, job_id: int):
+    """Return a reachable default target pair derived from the saved arm spec."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This design has no saved specification."}, status=409)
+    try:
+        spec = json.loads(spec_artifact.body)
+        if spec.get("robot_class") != "tabletop_robot_arm":
+            return JsonResponse({"error": "Physics simulation is currently available for tabletop arms."}, status=409)
+        from .arm_simulation import default_task_targets
+        pick, place = default_task_targets(spec)
+    except Exception as exc:
+        from .arm_simulation import ArmSimulationError
+        if isinstance(exc, ArmSimulationError):
+            return JsonResponse({"error": str(exc)}, status=422)
+        if isinstance(exc, (json.JSONDecodeError, TypeError, ValueError)):
+            return JsonResponse({"error": str(exc)}, status=400)
+        raise
+    return JsonResponse({"pick_target_m": list(pick), "place_target_m": list(place), "spec_artifact_id": spec_artifact.id})
+
+
+@require_POST
+def propose_arm_simulation_repair(request, job_id: int):
+    """Ask Meta for one bounded arm-spec change using the latest local trial."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    sim_artifact = job.artifacts.filter(kind="sim").order_by("-id").first()
+    if spec_artifact is None or sim_artifact is None:
+        return JsonResponse({"error": "Run a MuJoCo task before asking for a simulation repair."}, status=409)
+    try:
+        spec = json.loads(spec_artifact.body)
+        simulation = json.loads(sim_artifact.body)
+        if spec.get("robot_class") != "tabletop_robot_arm" or simulation.get("schema_version") != "forgebot-arm-simulation/v1":
+            return JsonResponse({"error": "A tabletop-arm MuJoCo result is required."}, status=409)
+        if simulation.get("passed"):
+            return JsonResponse({"error": "This simulation passed its acceptance gate; no repair is needed."}, status=409)
+        if simulation.get("spec_artifact_id") != spec_artifact.id:
+            return JsonResponse({"error": "The latest simulation belongs to an older design. Rerun it before requesting a repair."}, status=409)
+        from .robot_arm import propose_arm_repair
+        proposal = propose_arm_repair(spec, simulation)
+        proposal_artifact = store_artifact(job, "repair_proposal", json.dumps(proposal, indent=2), "arm-repair-proposal/v1")
+    except (json.JSONDecodeError, TypeError, AttributeError, ValueError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Exception as exc:
+        from .meta_model import MetaModelError
+        if isinstance(exc, MetaModelError):
+            return JsonResponse({"error": str(exc)}, status=502)
+        raise
+    return JsonResponse({**proposal, "proposal_artifact_id": proposal_artifact.id})
+
+
+@require_POST
+def apply_arm_simulation_repair(request, job_id: int):
+    """Apply a user-reviewed one-parameter repair and invalidate old simulation evidence."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    if job.state != states.SUCCEEDED:
+        return JsonResponse({"error": "Robot files must be built before applying a repair."}, status=409)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    sim_artifact = job.artifacts.filter(kind="sim").order_by("-id").first()
+    if spec_artifact is None or sim_artifact is None:
+        return JsonResponse({"error": "Run a MuJoCo task before applying its repair."}, status=409)
+    try:
+        proposal = json.loads(request.body or b"{}")
+        spec = json.loads(spec_artifact.body)
+        simulation = json.loads(sim_artifact.body)
+        proposal_artifact = job.artifacts.filter(kind="repair_proposal").order_by("-id").first()
+        if spec.get("robot_class") != "tabletop_robot_arm" or simulation.get("schema_version") != "forgebot-arm-simulation/v1" or simulation.get("spec_artifact_id") != spec_artifact.id:
+            return JsonResponse({"error": "The latest simulation is stale; rerun the current design before applying a repair."}, status=409)
+        if simulation.get("passed"):
+            return JsonResponse({"error": "This simulation passed its acceptance gate; no repair is needed."}, status=409)
+        if proposal_artifact is None or proposal.get("proposal_artifact_id") != proposal_artifact.id:
+            return JsonResponse({"error": "Request a current AI repair proposal before applying a change."}, status=409)
+        saved_proposal = json.loads(proposal_artifact.body)
+        if any(proposal.get(key) != saved_proposal.get(key) for key in ("parameter", "joint_name", "value", "rationale", "review_notes")):
+            return JsonResponse({"error": "Submitted repair differs from the saved proposal; request a fresh proposal."}, status=409)
+        from .robot_arm import apply_arm_repair, generate_arm_starter_code, generate_arm_urdf
+        updated = apply_arm_repair(spec, proposal)
+        urdf = generate_arm_urdf(updated)
+        code = generate_arm_starter_code(updated)
+        from .validation import check_generated_code, validate_urdf
+        findings = [{"severity": finding.severity, "path": finding.artifact_path, "message": finding.message} for finding in (validate_urdf(urdf) + check_generated_code(code))]
+        blockers = [finding for finding in findings if finding["severity"] == "blocker"]
+        if blockers:
+            raise ValueError("Repaired files failed local validation: " + "; ".join(item["message"] for item in blockers))
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    spec_artifact = store_artifact(job, "spec", json.dumps(updated, indent=2), spec_artifact.schema_version)
+    urdf_artifact = store_artifact(job, "urdf", urdf, "urdf/v1")
+    code_artifact = store_artifact(job, "code", code, "code/v1")
+    report_artifact = store_artifact(job, "report", json.dumps({"findings": findings, "repair": {key: proposal.get(key) for key in ("parameter", "joint_name", "value", "rationale")}, "requires_resimulation": True}, indent=2), "report/v1")
+    stale_sim = {"status": "stale", "reason": "The arm specification changed after the last simulation. Run MuJoCo again before treating the repair as validated.", "spec_artifact_id": spec_artifact.id}
+    sim_artifact = store_artifact(job, "sim", json.dumps(stale_sim, indent=2), "sim/mujoco-arm/v1")
+    JobEvent.objects.create(job=job, state=job.state, detail={"stage": "arm_simulation_repair", "parameter": proposal.get("parameter"), "requires_resimulation": True})
+    return JsonResponse({"spec_artifact_id": spec_artifact.id, "urdf_artifact_id": urdf_artifact.id, "code_artifact_id": code_artifact.id, "report_artifact_id": report_artifact.id, "simulation_artifact_id": sim_artifact.id})
 
 
 @require_GET

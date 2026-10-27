@@ -33,6 +33,51 @@ urlpatterns = [
         views.approve_job,
         name="approve-job",
     ),
+    path(
+        "api/v1/jobs/<int:job_id>/rebuild-cad",
+        views.rebuild_cad_package,
+        name="rebuild-cad-package",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/edit-cad-sketches",
+        views.edit_cad_sketches,
+        name="edit-cad-sketches",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/propose-cad-sketch-edit",
+        views.propose_cad_sketch_edit,
+        name="propose-cad-sketch-edit",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/inspect-component",
+        views.inspect_design_component,
+        name="inspect-design-component",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/simulate-arm",
+        views.simulate_tabletop_arm,
+        name="simulate-tabletop-arm",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/benchmark-arm-designs",
+        views.benchmark_project_arm_designs,
+        name="benchmark-project-arm-designs",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/arm-simulation-defaults",
+        views.tabletop_arm_simulation_defaults,
+        name="tabletop-arm-simulation-defaults",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/propose-arm-repair",
+        views.propose_arm_simulation_repair,
+        name="propose-arm-simulation-repair",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/apply-arm-repair",
+        views.apply_arm_simulation_repair,
+        name="apply-arm-simulation-repair",
+    ),
     path("api/v1/jobs/<int:job_id>", views.get_job, name="get-job"),
     path("api/v1/jobs/<int:job_id>/cancel", views.cancel_job, name="cancel-job"),
     path(

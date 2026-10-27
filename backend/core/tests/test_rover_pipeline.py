@@ -27,11 +27,11 @@ class JobStateTests(SimpleTestCase):
             states.can_transition(states.AWAITING_REVIEW, states.GENERATING)
         )
 
-    def test_failed_gate_blocks_simulation(self):
-        # VALIDATING may go to SIMULATING or FAILED, never straight to success.
-        self.assertFalse(
-            states.can_transition(states.VALIDATING, states.SUCCEEDED)
-        )
+    def test_validation_can_complete_package_or_continue_to_simulation(self):
+        # Some workflows produce a reviewable package without a simulator;
+        # workflows with a simulation gate transition through SIMULATING.
+        self.assertTrue(states.can_transition(states.VALIDATING, states.SUCCEEDED))
+        self.assertTrue(states.can_transition(states.VALIDATING, states.SIMULATING))
         self.assertTrue(states.can_transition(states.VALIDATING, states.FAILED))
 
     def test_illegal_transition_raises(self):

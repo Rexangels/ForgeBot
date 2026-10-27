@@ -14,7 +14,7 @@ from . import states
 from .artifacts import store_artifact
 from .exports import build_manifest, manifest_json
 from .meta_model import MetaModelError
-from .models import Job
+from .models import Job, JobEvent
 from .rover import (
     MAX_MOTOR_EFFORT,
     MAX_SPEED_M_S,
@@ -112,34 +112,63 @@ def run_from_approval(job: Job) -> dict:
     bom_doc = json.loads(job.artifacts.get(kind="bom").body)
     spec_doc = json.loads(job.artifacts.get(kind="spec").body)
     if spec_doc.get("robot_class") == "image_robot_design":
-        from .image_design import generate_image_robot_urdf, generate_openscad
+        from .image_design import generate_cad_package, generate_image_robot_urdf
 
         urdf = generate_image_robot_urdf(spec_doc)
         store_artifact(job, "urdf", urdf, "urdf/v1")
-        store_artifact(job, "cad", generate_openscad(spec_doc), "openscad/v1")
+        cad_package = generate_cad_package(spec_doc)
+        store_artifact(job, "cad", json.dumps(cad_package, indent=2), "forgebot-cad-package/v4")
+        assembly_validation = json.loads(cad_package["files"]["assembly_validation.json"])
         job.transition(states.VALIDATING)
         findings = [
             {"severity": item.severity, "path": item.artifact_path, "message": item.message, "remediation": item.remediation}
             for item in validate_urdf(urdf, "image_robot.urdf")
         ]
+        findings.extend({
+            "severity": item["severity"], "path": f"cad/assembly/{item.get('code', 'check')}",
+            "message": item["message"], "remediation": "Review the CAD assembly interfaces and component placement before using the concept.",
+        } for item in assembly_validation["findings"] if item["severity"] in ("blocker", "warning"))
         blockers = [item for item in findings if item["severity"] == SEVERITY_BLOCKER]
-        store_artifact(job, "report", json.dumps({"findings": findings, "label": "conceptual geometry only"}, indent=2), "report/v1")
+        store_artifact(job, "report", json.dumps({"findings": findings, "assembly_validation": assembly_validation, "label": "conceptual geometry only"}, indent=2), "report/v1")
         simulation = {"status": "not_run", "reason": "Image-derived concept has no actuator, mass-property, collision, or controller model yet."}
         store_artifact(job, "sim", json.dumps(simulation, indent=2), "sim/v1")
         if blockers:
+            freecad_result = {"schema_version": "forgebot-freecad-export/v1", "status": "blocked", "message": "FreeCAD export was skipped because the URDF or design validation found blockers."}
+        else:
+            from .freecad_export import FreeCADError, run_freecad_export
+
+            try:
+                freecad_result = run_freecad_export(job.id, cad_package)
+            except FreeCADError as exc:
+                freecad_result = {
+                    "schema_version": "forgebot-freecad-export/v1",
+                    "status": "unavailable" if "not found" in str(exc).lower() else "failed",
+                    "message": str(exc),
+                }
+        store_artifact(job, "cad_export", json.dumps(freecad_result, indent=2), "forgebot-freecad-export/v1")
+        JobEvent.objects.create(
+            job=job,
+            state=job.state,
+            detail={
+                "stage": "freecad_export",
+                "status": freecad_result["status"],
+                "message": "FreeCAD created the native CAD assembly." if freecad_result["status"] == "completed" else freecad_result.get("message", "FreeCAD export did not run."),
+            },
+        )
+        if blockers:
             job.transition(states.FAILED)
-            return {"passed": False, "blockers": len(blockers), "simulation": "not run"}
+            return {"passed": False, "blockers": len(blockers), "assembly_validation": assembly_validation["status"], "freecad_export": freecad_result["status"], "simulation": "not run"}
         manifest = build_manifest(
             input_revision=job.input_revision,
             provider=job.provider,
             model=job.model,
-            artifact_versions={"spec": "image-robot-concept/v1", "urdf": "urdf/v1", "cad": "openscad/v1", "validators": VALIDATOR_VERSION},
+            artifact_versions={"spec": "image-robot-concept/v1", "urdf": "urdf/v1", "cad": "forgebot-cad-package/v4", "validators": VALIDATOR_VERSION},
             validator_version=VALIDATOR_VERSION,
             sim_config=simulation,
         )
         store_artifact(job, "manifest", manifest_json(manifest), "export/v1")
         job.transition(states.SUCCEEDED)
-        return {"passed": True, "blockers": 0, "simulation": "not run; concept geometry only"}
+        return {"passed": True, "blockers": 0, "assembly_validation": assembly_validation["status"], "freecad_export": freecad_result["status"], "simulation": "not run; concept geometry only"}
     if spec_doc.get("robot_class") == "tabletop_robot_arm":
         urdf = generate_arm_urdf(spec_doc)
         code = generate_arm_starter_code(spec_doc)

@@ -142,6 +142,10 @@ def validate_arm_design(spec: dict) -> list[str]:
     if not isinstance(geometry, dict):
         errors.append("geometry must be an object")
         geometry = {}
+    else:
+        for key in ("base_diameter_m", "base_height_m", "upper_arm_length_m", "forearm_length_m", "wrist_length_m"):
+            if not _finite_number(geometry.get(key)) or geometry[key] <= 0:
+                errors.append(f"geometry.{key} must be a finite positive number")
     lengths = [geometry.get(key) for key in ("upper_arm_length_m", "forearm_length_m", "wrist_length_m")]
     if all(_finite_number(item) for item in lengths) and sum(lengths) > 0.8:
         errors.append("maximum link reach must not exceed 0.8 m")
@@ -150,7 +154,9 @@ def validate_arm_design(spec: dict) -> list[str]:
         errors.append("masses must be an object")
     elif all(_finite_number(value) for value in masses.values()) and sum(masses.values()) > 5:
         errors.append("estimated robot mass must not exceed 5 kg")
-    if _finite_number(spec.get("payload_kg")) and spec["payload_kg"] > 0.25:
+    if not _finite_number(spec.get("payload_kg")) or spec["payload_kg"] <= 0:
+        errors.append("payload_kg must be a finite positive number")
+    elif spec["payload_kg"] > 0.25:
         errors.append("payload must not exceed the 0.25 kg MVP limit")
     joint_limits = spec.get("joint_limits")
     if not isinstance(joint_limits, list) or len(joint_limits) != len(JOINT_NAMES):
@@ -165,12 +171,129 @@ def validate_arm_design(spec: dict) -> list[str]:
             lower, upper = joint.get("lower_deg"), joint.get("upper_deg")
             if _finite_number(lower) and _finite_number(upper) and lower >= upper:
                 errors.append(f"joint_limits[{index}] lower_deg must be less than upper_deg")
+            for key in ("effort_nm", "velocity_rad_s"):
+                if not _finite_number(joint.get(key)) or joint[key] <= 0:
+                    errors.append(f"joint_limits[{index}].{key} must be a finite positive number")
+            for key in ("lower_deg", "upper_deg"):
+                if not _finite_number(joint.get(key)) or not -180 <= joint[key] <= 180:
+                    errors.append(f"joint_limits[{index}].{key} must be between -180 and 180 degrees")
+    if isinstance(masses, dict):
+        for key in ("base_kg", "shoulder_kg", "upper_arm_kg", "forearm_kg", "wrist_kg", "tool_kg"):
+            if not _finite_number(masses.get(key)) or masses[key] <= 0:
+                errors.append(f"masses.{key} must be a finite positive number")
+    gripper = spec.get("gripper")
+    if not isinstance(gripper, dict):
+        errors.append("gripper must be an object")
+    else:
+        for key in ("jaw_opening_m", "grip_force_n"):
+            if not _finite_number(gripper.get(key)) or gripper[key] <= 0:
+                errors.append(f"gripper.{key} must be a finite positive number")
     bom = spec.get("bom")
     if not isinstance(bom, list) or len(bom) < 4:
         errors.append("BOM must contain at least four proposed components")
     elif any(not isinstance(item, dict) or item.get("availability") != "unverified" for item in bom):
         errors.append("all generated BOM items must remain marked unverified")
     return errors
+
+
+ARM_REPAIR_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["parameter", "joint_name", "value", "rationale", "review_notes"],
+    "properties": {
+        "parameter": {"type": "string", "enum": ["joint_effort_nm", "joint_velocity_rad_s", "grip_force_n", "payload_kg", "upper_arm_length_m", "forearm_length_m", "wrist_length_m"]},
+        "joint_name": {"type": "string", "enum": [*JOINT_NAMES, "none"]},
+        "value": {"type": "number"},
+        "rationale": {"type": "string"},
+        "review_notes": {"type": "string"},
+    },
+}
+
+
+def propose_arm_repair(spec: dict, simulation: dict) -> dict:
+    """Ask Meta for one bounded change based on the latest local physics result."""
+    if not isinstance(simulation, dict) or simulation.get("schema_version") != "forgebot-arm-simulation/v1":
+        raise ValueError("A current MuJoCo simulation result is required before proposing a repair.")
+    result = generate_structured_json(
+        system_prompt=(
+            "You review a conceptual tabletop robot arm after a local physics simulation. Propose exactly one conservative, reviewable change to one existing numeric design parameter. "
+            "Use only a parameter allowed by the schema, keep it inside the original design schema bounds, and use a joint_name only for joint limits. "
+            "Do not claim the change is correct, useful, safe, or verified. Explain uncertainty and say the user must accept it, rebuild, and rerun MuJoCo."
+        ),
+        user_prompt=(
+            "Reviewed arm specification:\n" + json.dumps(spec, ensure_ascii=False) + "\nLatest MuJoCo task and findings:\n"
+            + json.dumps({key: simulation.get(key) for key in ("engine", "engine_version", "task", "controller", "passed", "metrics", "assumptions")}, ensure_ascii=False)
+            + "\nChoose one small change that addresses a recorded failure. Prefer changing actuator effort/speed, grip force, payload target rating, or one link length only when the measurements support it."
+        ),
+        schema_name="forgebot_arm_repair_proposal",
+        schema=ARM_REPAIR_SCHEMA,
+    )
+    if result.get("parameter") not in ARM_REPAIR_SCHEMA["properties"]["parameter"]["enum"]:
+        raise ValueError("Model returned an unsupported arm parameter.")
+    target = result.get("joint_name")
+    parameter = result["parameter"]
+    if parameter in ("joint_effort_nm", "joint_velocity_rad_s"):
+        if target not in JOINT_NAMES:
+            raise ValueError("A joint repair must identify one supported joint.")
+        low, high = (0.2, 15.0) if parameter == "joint_effort_nm" else (0.1, 2.0)
+    else:
+        if target != "none":
+            raise ValueError("A non-joint repair must use joint_name=none.")
+        low, high = {
+            "grip_force_n": (1.0, 20.0),
+            "payload_kg": (0.02, 0.25),
+            "upper_arm_length_m": (0.08, 0.25),
+            "forearm_length_m": (0.08, 0.25),
+            "wrist_length_m": (0.04, 0.16),
+        }[parameter]
+    if not _finite_number(result.get("value")) or not low <= result["value"] <= high:
+        raise ValueError(f"Proposed {parameter} must be between {low:g} and {high:g}.")
+    for key in ("rationale", "review_notes"):
+        if not isinstance(result.get(key), str) or not result[key].strip():
+            raise ValueError("Model returned an incomplete repair explanation.")
+        result[key] = result[key].strip()[:1200]
+    result["requires_human_review"] = True
+    return result
+
+
+def apply_arm_repair(spec: dict, proposal: dict) -> dict:
+    """Apply one schema-bounded repair to a copy and rerun local design checks."""
+    parameter = proposal.get("parameter")
+    value = proposal.get("value")
+    joint_name = proposal.get("joint_name")
+    if parameter not in ARM_REPAIR_SCHEMA["properties"]["parameter"]["enum"] or not _finite_number(value):
+        raise ValueError("Repair proposal contains an unsupported parameter or value.")
+    if parameter in ("joint_effort_nm", "joint_velocity_rad_s"):
+        if joint_name not in JOINT_NAMES:
+            raise ValueError("Repair proposal references an unknown joint.")
+        low, high = (0.2, 15.0) if parameter == "joint_effort_nm" else (0.1, 2.0)
+    else:
+        if joint_name != "none":
+            raise ValueError("A non-joint repair must use joint_name=none.")
+        low, high = {
+            "grip_force_n": (1.0, 20.0), "payload_kg": (0.02, 0.25),
+            "upper_arm_length_m": (0.08, 0.25), "forearm_length_m": (0.08, 0.25),
+            "wrist_length_m": (0.04, 0.16),
+        }[parameter]
+    if not low <= value <= high:
+        raise ValueError(f"Proposed {parameter} must be between {low:g} and {high:g}.")
+    updated = json.loads(json.dumps(spec))
+    if parameter in ("joint_effort_nm", "joint_velocity_rad_s"):
+        joint = next((item for item in updated["joint_limits"] if item.get("name") == joint_name), None)
+        if joint is None:
+            raise ValueError("Repair proposal references an unknown joint.")
+        joint["effort_nm" if parameter == "joint_effort_nm" else "velocity_rad_s"] = float(value)
+    elif parameter == "grip_force_n":
+        updated["gripper"][parameter] = float(value)
+    elif parameter == "payload_kg":
+        updated[parameter] = float(value)
+    else:
+        updated["geometry"][parameter] = float(value)
+    updated.setdefault("design_history", []).append({"action": "ai_simulation_repair_applied", "parameter": parameter, "joint_name": joint_name, "value": float(value), "requires_resimulation": True})
+    errors = validate_arm_design(updated)
+    if errors:
+        raise ValueError("Repair does not pass local design checks: " + "; ".join(errors))
+    return updated
 
 
 def _inertial(name: str, mass: float, length: float, radius: float, axis: str = "x") -> str:

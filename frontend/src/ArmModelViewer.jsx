@@ -139,7 +139,7 @@ function addPickPlaceObjects(scene) {
   deliveredObject.position.set(0, 0, 0.044);
   deliveredObject.visible = false;
   destination.add(deliveredObject);
-  const payload = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.04, 0.04), new THREE.MeshStandardMaterial({ color: "#e8a842", roughness: 0.7 }));
+  const payload = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.03, 0.03), new THREE.MeshStandardMaterial({ color: "#e8a842", roughness: 0.7 }));
   payload.name = "animated-payload";
   payload.position.set(0.045, 0, -0.02);
   payload.castShadow = true;
@@ -159,7 +159,7 @@ function reachableHeight(arm, target, offsets) {
   return { ...target };
 }
 
-export default function ArmModelViewer({ urdf, initialPickTarget = null }) {
+export default function ArmModelViewer({ urdf, initialPickTarget = null, simulationTrajectory = null }) {
   const mountRef = useRef(null);
   const sceneNodes = useRef(null);
   const playbackRef = useRef(null);
@@ -178,6 +178,21 @@ export default function ArmModelViewer({ urdf, initialPickTarget = null }) {
   const arm = parsed?.arm;
   const pickSolution = arm ? solveArmTarget(arm, pick) : null;
   const placeSolution = arm ? solveArmTarget(arm, place) : null;
+
+  useEffect(() => {
+    if (!arm || !Array.isArray(simulationTrajectory) || simulationTrajectory.length < 2) return;
+    const frames = simulationTrajectory
+      .filter((frame) => Number.isFinite(frame.time_s) && Array.isArray(frame.joints_rad) && frame.joints_rad.length === JOINTS.length)
+      .map((frame) => ({ time: frame.time_s, angles: Object.fromEntries(JOINTS.map((name, index) => [name, frame.joints_rad[index]])), gripper: frame.gripper_m, payload: frame.payload_m }));
+    if (frames.length < 2) return;
+    const path = simulationTrajectory.filter((frame) => Array.isArray(frame.tcp_m) && frame.tcp_m.length === 3).map((frame) => ({ x: frame.tcp_m[0], y: frame.tcp_m[1], z: frame.tcp_m[2] }));
+    angleRef.current = { ...frames[0].angles };
+    setAngles(angleRef.current);
+    const physicsPlayback = frames.every((frame) => Array.isArray(frame.payload) && frame.payload.length === 3 && Array.isArray(frame.gripper));
+    playbackRef.current = { startedAt: performance.now(), startAngles: { ...frames[0].angles }, frames, path, physicsPlayback };
+    setPlaybackNote("Replaying sampled MuJoCo joint, jaw, and payload states; rendered geometry is reconstructed from URDF");
+    setPlaying(true);
+  }, [simulationTrajectory, arm]);
 
   useEffect(() => {
     if (initialPickTarget) setPick({ x: initialPickTarget.x, y: initialPickTarget.y, z: initialPickTarget.z });
@@ -208,7 +223,14 @@ export default function ArmModelViewer({ urdf, initialPickTarget = null }) {
     const built = buildRobot(parsed, scene);
     const objects = addPickPlaceObjects(scene);
     const toolJoint = parsed.joints.find((joint) => joint.name === "tool_mount");
-    if (toolJoint) built.linkFrames.get(toolJoint.child)?.add(objects.payload);
+    const physicsPlayback = Array.isArray(simulationTrajectory) && simulationTrajectory.some((item) => Array.isArray(item.payload_m));
+    if (physicsPlayback) {
+      scene.add(objects.payload);
+      const firstPayloadFrame = simulationTrajectory.find((item) => Array.isArray(item.payload_m) && item.payload_m.length === 3);
+      if (firstPayloadFrame) objects.payload.position.set(...firstPayloadFrame.payload_m);
+      objects.payload.visible = true;
+      objects.pickObject.visible = false;
+    } else if (toolJoint) built.linkFrames.get(toolJoint.child)?.add(objects.payload);
     const targetMarker = new THREE.Mesh(new THREE.SphereGeometry(0.012, 16, 12), new THREE.MeshStandardMaterial({ color: "#d9864c", emissive: "#7d3a16" }));
     scene.add(targetMarker);
     const pathGeometry = new THREE.BufferGeometry();
@@ -244,8 +266,14 @@ export default function ArmModelViewer({ urdf, initialPickTarget = null }) {
           angleRef.current = { ...last.angles };
           setAngles(angleRef.current);
           objects.pickObject.visible = false;
-          objects.payload.visible = false;
-          objects.deliveredObject.visible = true;
+          if (playback.physicsPlayback) {
+            if (last.payload) objects.payload.position.set(...last.payload);
+            objects.payload.visible = true;
+            objects.deliveredObject.visible = false;
+          } else {
+            objects.payload.visible = false;
+            objects.deliveredObject.visible = true;
+          }
           playbackRef.current = null;
           setPlaying(false);
         } else {
@@ -257,13 +285,21 @@ export default function ArmModelViewer({ urdf, initialPickTarget = null }) {
           angleRef.current = next;
           setAngles(next);
           applyJointPose(built.jointFrames, next);
-          const gripFrom = from.closed ? 1 : 0;
-          const gripTo = to.closed ? 1 : 0;
+          const gripFrom = from.gripper ? Math.min(1, Math.max(...from.gripper) / 0.01) : (from.closed ? 1 : 0);
+          const gripTo = to.gripper ? Math.min(1, Math.max(...to.gripper) / 0.01) : (to.closed ? 1 : 0);
           const gripAmount = gripFrom + (gripTo - gripFrom) * smooth;
           built.gripperVisuals.forEach(({ frame: jawFrame, side, initialY }) => { jawFrame.position.y = initialY + side * gripAmount * (0.006 - Math.abs(initialY)); });
-          objects.payload.visible = to.closed;
-          objects.pickObject.visible = segmentIndex < 2 || (segmentIndex === 2 && !to.closed);
-          if (segmentIndex >= 6 && fraction >= 0.95) objects.deliveredObject.visible = true;
+          if (playback.physicsPlayback && from.payload && to.payload) {
+            const payloadPosition = from.payload.map((value, index) => value + (to.payload[index] - value) * smooth);
+            objects.payload.position.set(...payloadPosition);
+            objects.payload.visible = true;
+            objects.pickObject.visible = false;
+            objects.deliveredObject.visible = false;
+          } else {
+            objects.payload.visible = to.closed;
+            objects.pickObject.visible = segmentIndex < 2 || (segmentIndex === 2 && !to.closed);
+            if (segmentIndex >= 6 && fraction >= 0.95) objects.deliveredObject.visible = true;
+          }
         }
       }
       const pose = forwardArmKinematics(parsed.arm, angleRef.current);

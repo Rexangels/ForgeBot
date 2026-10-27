@@ -294,7 +294,7 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
             {cameraActive ? <><button className="primary-action" onClick={capture}>Capture frame</button><button className="secondary-action" onClick={stopCamera}>Close camera</button></> : <><button className="secondary-action" onClick={startCamera}>Open camera</button><label className="secondary-action vision-file">Choose image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { selectReferenceImage(event.target.files?.[0]); event.target.value = ""; }} /></label></>}
             <button className="primary-action" disabled={!image || busy || cameraActive} onClick={analyze}>{busy ? "Analyzing image…" : "Ask Meta to inspect →"}</button>
           </div>
-          <div className="image-design-card"><div><span className="eyebrow">IMAGE-TO-ROBOT CONCEPT</span><strong>Design a robot from this reference</strong><small>Meta proposes the visible shape and part layout. ForgeBot builds primitive CAD source and a 3D concept for review.</small></div>
+          <div className="image-design-card"><div><span className="eyebrow">IMAGE-TO-ROBOT CONCEPT</span><strong>Design a robot from this reference</strong><small>Meta proposes the visible shape and part layout. ForgeBot builds separate editable part modules, an assembled CAD source, URDF, and a 3D concept for review.</small></div>
             <div className="design-reference-picker"><label htmlFor="robot-reference-image">Robot reference image</label><label className="design-reference-button" htmlFor="robot-reference-image">{image ? "Replace reference image" : "Choose a robot image"}<input id="robot-reference-image" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { selectReferenceImage(event.target.files?.[0]); event.target.value = ""; }} /></label>{image ? <div className="design-reference-selected"><img src={previewUrl} alt="Selected robot design reference" /><span><strong>{image.name}</strong><small>Shared with AI eyes · this image will guide robot concept generation</small></span></div> : <small className="image-design-note">Choose a robot photo or reference illustration. The same image is available to AI eyes for scene understanding.</small>}</div>
             <label>What should the robot do?<textarea rows={3} maxLength={2000} value={designBrief} onChange={(event) => setDesignBrief(event.target.value)} /></label>
             <div className="target-edit-grid"><label>Approximate robot height (m)<input type="number" min="0.05" max="3" step="0.01" value={designHeight} onChange={(event) => setDesignHeight(Number(event.target.value))} /></label></div>
@@ -425,6 +425,11 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
   const [bodies, setBodies] = useState({});
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [trainArmController, setTrainArmController] = useState(false);
+  const [simulationPick, setSimulationPick] = useState([0.28, 0, 0.055]);
+  const [simulationPlace, setSimulationPlace] = useState([0.2, 0.18, 0.055]);
+  const [armBenchmark, setArmBenchmark] = useState(null);
+  const [armRepairProposal, setArmRepairProposal] = useState(null);
   const refresh = useCallback(async () => {
     const data = await api.job(jobId);
     setJob(data);
@@ -462,12 +467,30 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
   const activeKind = ({ design: "spec", urdf: "urdf", parts: "bom", cad: "cad", code: "code", validation: "report", simulation: "sim" })[selectedPanel];
   const activeArtifact = job?.artifacts.find((item) => item.kind === activeKind);
   const activeBody = activeArtifact && bodies[activeArtifact.id];
+  const cadExportArtifact = job?.artifacts.find((item) => item.kind === "cad_export");
+  const cadExportBody = cadExportArtifact && bodies[cadExportArtifact.id];
+  const cadExportDocument = cadExportBody ? { ...(parseArtifactDocument(cadExportBody) || {}), artifact_id: cadExportArtifact.id } : null;
   const designArtifact = job?.artifacts.find((item) => item.kind === "spec");
   const urdfArtifact = job?.artifacts.find((item) => item.kind === "urdf");
   const simulationArtifact = job?.artifacts.find((item) => item.kind === "sim");
   const simulationDoc = simulationArtifact ? parseArtifactDocument(bodies[simulationArtifact.id]) : null;
+  const benchmarkArtifact = job?.artifacts.find((item) => item.kind === "sim_benchmark");
+  const benchmarkDoc = benchmarkArtifact ? parseArtifactDocument(bodies[benchmarkArtifact.id]) : armBenchmark;
   const designSpec = designArtifact ? parseArtifactDocument(bodies[designArtifact.id]) : null;
   const urdfDocument = urdfArtifact ? bodies[urdfArtifact.id] : null;
+  useEffect(() => {
+    if (selectedPanel !== "simulation" || job?.robot_class !== "tabletop_robot_arm" || !designArtifact) return undefined;
+    let active = true;
+    api.armSimulationDefaults(jobId)
+      .then((defaults) => {
+        if (active) {
+          setSimulationPick(defaults.pick_target_m);
+          setSimulationPlace(defaults.place_target_m);
+        }
+      })
+      .catch((err) => { if (active) setError(err.message); });
+    return () => { active = false; };
+  }, [jobId, selectedPanel, job?.robot_class, designArtifact?.id]);
   useEffect(() => {
     if (!simulationArtifact || bodies[simulationArtifact.id]) return;
     let active = true;
@@ -480,6 +503,16 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
       });
     return () => { active = false; };
   }, [simulationArtifact?.id, bodies]);
+  useEffect(() => {
+    if (!benchmarkArtifact || bodies[benchmarkArtifact.id]) return;
+    let active = true;
+    api.artifact(benchmarkArtifact.id)
+      .then((artifact) => {
+        if (active) setBodies((prev) => ({ ...prev, [artifact.id]: artifact }));
+      })
+      .catch((err) => { if (active) setError(err.message); });
+    return () => { active = false; };
+  }, [benchmarkArtifact?.id, bodies]);
   useEffect(() => {
     if (!designArtifact || bodies[designArtifact.id]) return;
     let active = true;
@@ -504,6 +537,18 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
       });
     return () => { active = false; };
   }, [urdfArtifact?.id, bodies]);
+  useEffect(() => {
+    if (!cadExportArtifact || bodies[cadExportArtifact.id]) return;
+    let active = true;
+    api.artifact(cadExportArtifact.id)
+      .then((artifact) => {
+        if (active) setBodies((prev) => ({ ...prev, [artifact.id]: artifact }));
+      })
+      .catch((err) => {
+        if (active) setError(err.message);
+      });
+    return () => { active = false; };
+  }, [cadExportArtifact?.id, bodies]);
   const approve = async () => {
     setBusy(true);
     setError("");
@@ -512,6 +557,121 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
       refresh();
     } catch (err) {
       setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const rebuildCad = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.rebuildCad(jobId);
+      const artifactIds = [result.artifact_id, result.freecad_artifact_id].filter(Boolean);
+      const artifacts = await Promise.all(artifactIds.map((artifactId) => api.artifact(artifactId)));
+      setBodies((previous) => ({ ...previous, ...Object.fromEntries(artifacts.map((artifact) => [artifact.id, artifact])) }));
+      await refresh();
+      setSelectedPanel("assembly");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const editCadSketches = async (components) => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.editCadSketches(jobId, components);
+      const artifactIds = [result.spec_artifact_id, result.urdf_artifact_id, result.artifact_id, result.freecad_artifact_id].filter(Boolean);
+      const artifacts = await Promise.all(artifactIds.map((artifactId) => api.artifact(artifactId)));
+      setBodies((previous) => ({ ...previous, ...Object.fromEntries(artifacts.map((artifact) => [artifact.id, artifact])) }));
+      await refresh();
+      setSelectedPanel("assembly");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const runArmPhysics = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.simulateArm(jobId, { trainController: trainArmController, pickTargetM: simulationPick.map(Number), placeTargetM: simulationPlace.map(Number) });
+      const artifact = await api.artifact(result.artifact_id);
+      setBodies((previous) => ({ ...previous, [artifact.id]: artifact }));
+      await refresh();
+      setSelectedPanel("simulation");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const benchmarkArmDesigns = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.benchmarkArmDesigns(jobId);
+      const artifact = await api.artifact(result.artifact_id);
+      setBodies((previous) => ({ ...previous, [artifact.id]: artifact }));
+      setArmBenchmark(result.benchmark);
+      await refresh();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const requestArmRepair = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      setArmRepairProposal(await api.proposeArmRepair(jobId));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const applyArmRepair = async () => {
+    if (!armRepairProposal) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.applyArmRepair(jobId, armRepairProposal);
+      const ids = [result.spec_artifact_id, result.urdf_artifact_id, result.code_artifact_id, result.report_artifact_id, result.simulation_artifact_id];
+      const artifacts = await Promise.all(ids.map((id) => api.artifact(id)));
+      setBodies((previous) => ({ ...previous, ...Object.fromEntries(artifacts.map((artifact) => [artifact.id, artifact])) }));
+      setArmRepairProposal(null);
+      await refresh();
+      setSelectedPanel("simulation");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const proposeCadSketchEdit = async (componentId, instruction) => {
+    setBusy(true);
+    setError("");
+    try {
+      return await api.proposeCadSketchEdit(jobId, componentId, instruction);
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const inspectDesignComponent = async (componentId, question) => {
+    setBusy(true);
+    setError("");
+    try {
+      return await api.inspectComponent(jobId, componentId, question);
+    } catch (err) {
+      setError(err.message);
+      throw err;
     } finally {
       setBusy(false);
     }
@@ -556,20 +716,22 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
           <div className="panel-heading"><div><p className="eyebrow">PROJECT FILES</p><h3>Robot package</h3></div></div>
           <button className={`asset-button ${selectedPanel === "canvas" ? "active" : ""}`} onClick={() => openPanel("canvas")}><span>▦</span><div><strong>Robot canvas</strong><small>{job?.robot_class === "tabletop_robot_arm" ? "3D assembly & joint pose" : isHumanoid ? "3D humanoid assembly" : isImageDesign ? "Image-derived robot" : "Route & prototype view"}</small></div></button>
           <button className={`asset-button ${selectedPanel === "assembly" ? "active" : ""}`} onClick={() => openPanel("assembly")}><span>⬡</span><div><strong>CAD assembly</strong><small>Import & connect parts</small></div></button>
-          {[{ key: "design", title: "Robot design", sub: "Specification", icon: "◇", kind: "spec" }, { key: "urdf", title: "URDF model", sub: "Robot description", icon: "⌘", kind: "urdf" }, { key: "parts", title: "Parts list", sub: "Bill of materials", icon: "▤", kind: "bom" }, { key: "cad", title: "CAD source", sub: "OpenSCAD concept", icon: "⬡", kind: "cad" }, { key: "code", title: "Control software", sub: "Starter code", icon: "‹/›", kind: "code" }, { key: "validation", title: "Validation", sub: "Checks & findings", icon: "✓", kind: "report" }, { key: "simulation", title: "Simulation", sub: "Physics run", icon: "↗", kind: "sim" }].map((item) => {
+          {[{ key: "design", title: "Robot design", sub: "Specification", icon: "◇", kind: "spec" }, { key: "urdf", title: "URDF model", sub: "Robot description", icon: "⌘", kind: "urdf" }, { key: "parts", title: "Parts list", sub: "Bill of materials", icon: "▤", kind: "bom" }, { key: "cad", title: "CAD package", sub: "Parts + assembly", icon: "⬡", kind: "cad" }, { key: "code", title: "Control software", sub: "Starter code", icon: "‹/›", kind: "code" }, { key: "validation", title: "Validation", sub: "Checks & findings", icon: "✓", kind: "report" }, { key: "simulation", title: "Simulation", sub: "Physics run", icon: "↗", kind: "sim" }].map((item) => {
             const found = job?.artifacts.find((a) => a.kind === item.kind);
-            const unavailableLabel = item.key === "simulation" && job?.robot_class === "tabletop_robot_arm" ? "Arm physics not built yet" : item.key === "simulation" && isHumanoid ? "Humanoid physics is next" : "Created during build";
+            const canRunArmSimulation = item.key === "simulation" && job?.robot_class === "tabletop_robot_arm" && job?.state === "succeeded";
+            const unavailableLabel = item.key === "simulation" && job?.robot_class === "tabletop_robot_arm" ? (canRunArmSimulation ? "Run MuJoCo task" : "Build robot files first") : item.key === "simulation" && isHumanoid ? "Humanoid physics is next" : "Created during build";
             const sublabel = found && item.key === "simulation" && isHumanoid ? "Physics not run" : found ? item.sub : unavailableLabel;
-            return <button key={item.key} className={`asset-button ${selectedPanel === item.key ? "active" : ""} ${!found ? "unavailable" : ""}`} onClick={() => openPanel(item.key)} disabled={!found}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{sublabel}</small></div>{found && <i />}</button>;
+            return <button key={item.key} className={`asset-button ${selectedPanel === item.key ? "active" : ""} ${!found && !canRunArmSimulation ? "unavailable" : ""}`} onClick={() => openPanel(item.key)} disabled={!found && !canRunArmSimulation}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{sublabel}</small></div>{found && <i />}</button>;
           })}
           <div className="agent-disclaimer"><span className="agent-orb small">✦</span><p><strong>Design generation</strong><br />{isHumanoid ? "Meta proposes the humanoid concept; local code builds and validates files." : job?.robot_class === "tabletop_robot_arm" ? "Meta proposes the arm spec; local code builds and validates files." : "Rover artifacts are generated by the local demo pipeline."}</p></div>
         </aside>
 
         <section className="studio-panel editor-panel">
-          <div className="editor-toolbar"><div><p className="eyebrow">{selectedPanel === "canvas" || selectedPanel === "assembly" ? "VISUAL WORKSPACE" : "ARTIFACT INSPECTOR"}</p><h3>{({ canvas: "Robot canvas", assembly: "CAD assembly", design: "Robot design", urdf: "URDF model", parts: "Bill of materials", cad: "OpenSCAD source", code: "Control software", validation: "Validation report", simulation: "Simulation results" })[selectedPanel]}</h3></div><span className="canvas-mode">{selectedPanel === "assembly" ? "LOCAL CAD IMPORT" : selectedPanel === "cad" ? "CONCEPTUAL CAD" : selectedPanel === "code" ? "STARTER CODE" : selectedPanel === "canvas" ? (job?.robot_class === "differential-drive-rover" ? "2D PREVIEW" : "3D MODEL") : activeBody?.schema_version || "WAITING"}</span></div>
-          <div style={{ display: selectedPanel === "assembly" ? "block" : "none" }}><ComponentAssemblyEditor /></div>
-          {selectedPanel !== "assembly" && (selectedPanel === "canvas" ? <div className="canvas-stage job-canvas">{job?.robot_class === "tabletop_robot_arm" ? <ArmModelViewer urdf={urdfDocument?.body} initialPickTarget={visionPickTarget} /> : isHumanoid || isImageDesign ? <UrdfModelViewer urdf={urdfDocument?.body} geometry={isHumanoid ? designSpec?.geometry : null} autoFrame={isImageDesign} /> : <RoverView sim={simulationDoc} />}</div> : activeBody ? <div className="artifact-workspace"><ArtifactViewer artifact={activeBody} /></div> : <div className="empty-state">This file appears after its workflow stage completes.</div>)}
-          {selectedPanel === "canvas" && (job?.robot_class === "tabletop_robot_arm" ? <div className="canvas-specs"><div><span>Robot platform</span><strong>4-DOF tabletop arm</strong></div><div><span>Maximum reach</span><strong>{designSpec ? `${(designSpec.geometry.upper_arm_length_m + designSpec.geometry.forearm_length_m + designSpec.geometry.wrist_length_m).toFixed(2)} m` : "Generating spec"}</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_kg} kg` : "Awaiting design"}</strong></div></div> : isHumanoid ? <div className="canvas-specs"><div><span>Robot platform</span><strong>{designSpec ? `${designSpec.height_m.toFixed(2)} m humanoid` : "Research humanoid"}</strong></div><div><span>Actuated joints</span><strong>31 body · 20 per hand</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_per_arm_kg.toFixed(1)} kg per arm` : "Awaiting design"}</strong></div></div> : <div className="canvas-specs"><div><span>Robot platform</span><strong>Differential-drive rover</strong></div><div><span>Route distance</span><strong>{simulationDoc ? `${Number(simulationDoc.distance_m).toFixed(1)} m` : "Awaiting simulation"}</strong></div><div><span>Evidence</span><strong>{simulationDoc?.passed ? "Route passed" : simulationDoc ? "Review findings" : "Preview only"}</strong></div></div>)}
+          <div className="editor-toolbar"><div><p className="eyebrow">{selectedPanel === "canvas" || selectedPanel === "assembly" ? "VISUAL WORKSPACE" : "ARTIFACT INSPECTOR"}</p><h3>{({ canvas: "Robot canvas", assembly: "CAD assembly", design: "Robot design", urdf: "URDF model", parts: "Bill of materials", cad: "CAD parts and assembly", code: "Control software", validation: "Validation report", simulation: "Simulation results" })[selectedPanel]}</h3></div><span className="canvas-mode">{selectedPanel === "assembly" ? "LOCAL CAD IMPORT" : selectedPanel === "cad" ? "PARAMETRIC CONCEPT" : selectedPanel === "code" ? "STARTER CODE" : selectedPanel === "canvas" ? (job?.robot_class === "differential-drive-rover" ? "2D PREVIEW" : "3D MODEL") : activeBody?.schema_version || "WAITING"}</span></div>
+          <div style={{ display: selectedPanel === "assembly" ? "block" : "none" }}><ComponentAssemblyEditor freecadExport={cadExportDocument} designSpec={isImageDesign ? designSpec : null} onInspectComponent={isImageDesign ? inspectDesignComponent : undefined} onProposeSketchEdit={isImageDesign ? proposeCadSketchEdit : undefined} onApplySketchEdit={isImageDesign ? editCadSketches : undefined} busy={busy} /></div>
+          {selectedPanel !== "assembly" && (selectedPanel === "canvas" ? <div className="canvas-stage job-canvas">{job?.robot_class === "tabletop_robot_arm" ? <ArmModelViewer urdf={urdfDocument?.body} initialPickTarget={visionPickTarget} /> : isHumanoid || isImageDesign ? <UrdfModelViewer urdf={urdfDocument?.body} geometry={isHumanoid ? designSpec?.geometry : null} autoFrame={isImageDesign} componentCount={isImageDesign ? designSpec?.components?.length : null} /> : <RoverView sim={simulationDoc} />}</div> : selectedPanel === "simulation" && job?.robot_class === "tabletop_robot_arm" ? <div className="artifact-workspace arm-simulation-workspace"><div className="simulation-controls"><p className="eyebrow">REPRODUCIBLE PHYSICS TASK</p><h3>Tabletop pick and place</h3><p>Run the reviewed arm specification in MuJoCo with contact physics, gravity, joint effort limits, and a parallel gripper.</p>{simulationDoc?.status === "stale" && <p className="simulation-stale-note">{simulationDoc.reason}</p>}{[{ label: "Pick target", values: simulationPick, set: setSimulationPick }, { label: "Place target", values: simulationPlace, set: setSimulationPlace }].map((target) => <fieldset className="target-fields" key={target.label}><legend>{target.label} · metres</legend>{["X", "Y", "Z"].map((axis, index) => <label key={axis}>{axis}<input type="number" min="-0.75" max="0.75" step="0.01" value={target.values[index]} disabled={busy} onChange={(event) => target.set((current) => current.map((value, i) => i === index ? event.target.value : value))} /></label>)}</fieldset>)}<label className="simulation-training-toggle"><input type="checkbox" checked={trainArmController} disabled={busy} onChange={(event) => setTrainArmController(event.target.checked)} /> Tune controller gains against this task before the final run</label><button className="primary-action" type="button" disabled={busy || job?.state !== "succeeded"} onClick={runArmPhysics}>{busy ? "Running MuJoCo…" : trainArmController ? "Tune and run simulation →" : "Run physics simulation →"}</button><small>Controller tuning is deterministic servo-gain search, not reinforcement learning. Generated mass and geometry remain estimates.</small></div>{simulationDoc?.engine === "MuJoCo" && <><div className="simulation-metrics"><div><span>Task</span><strong>{simulationDoc.passed ? "Passed" : "Needs review"}</strong></div><div><span>Payload placement error</span><strong>{(simulationDoc.metrics.goal_error_m * 1000).toFixed(1)} mm</strong></div><div><span>Contact steps observed</span><strong>{simulationDoc.metrics.contacts_seen}</strong></div><div><span>Physics engine</span><strong>MuJoCo {simulationDoc.engine_version}</strong></div></div>{!simulationDoc.passed && <div className="simulation-repair"><strong>Simulation found a design issue</strong><p>Ask Meta to use the local task metrics to suggest one bounded parameter change. You will review it before any files are rebuilt.</p><button className="secondary-button" type="button" disabled={busy} onClick={requestArmRepair}>{busy ? "Reviewing simulation…" : "Ask AI to suggest a repair"}</button>{armRepairProposal && <div className="cad-sketch-proposal"><strong>{armRepairProposal.parameter.replace(/_/g, " ")}{armRepairProposal.joint_name !== "none" ? ` · ${armRepairProposal.joint_name}` : ""}: {armRepairProposal.value}</strong><p>{armRepairProposal.rationale}</p><small>{armRepairProposal.review_notes}</small><button className="artifact-download" type="button" disabled={busy} onClick={applyArmRepair}>Accept change, rebuild files, and rerun</button><small>Applying the edit marks the previous physics result stale. A new simulation is required before the change counts as improved.</small></div>}</div>}{simulationDoc.controller?.training?.status === "completed" && <p className="simulation-training-result">Controller tuning completed · {simulationDoc.controller.training.iterations} configurations · selected gains {simulationDoc.controller.gains.map((gain) => gain.toFixed(0)).join(" / ")}</p>}<div className="canvas-stage job-canvas"><ArmModelViewer urdf={urdfDocument?.body} simulationTrajectory={simulationDoc.trajectory} /></div><details className="simulation-record"><summary>Open full simulation record and assumptions</summary><pre>{JSON.stringify(simulationDoc, null, 2)}</pre></details><p className="panel-footnote">The animation replays sampled joint states from the physics run using the visual URDF. The simulated payload path and contact results are in the run record.</p></>}</div> : activeBody ? <div className="artifact-workspace"><ArtifactViewer artifact={activeBody} cadExport={cadExportBody} onRebuildCad={isImageDesign && selectedPanel === "cad" ? rebuildCad : undefined} rebuildingCad={busy} /></div> : <div className="empty-state">This file appears after its workflow stage completes.</div>)}
+          {selectedPanel === "simulation" && job?.robot_class === "tabletop_robot_arm" && <section className="simulation-benchmark"><div><strong>Compare generated arm designs</strong><p>Run the same default MuJoCo pick-and-place acceptance task on up to eight recent arm designs in this project.</p></div><button className="secondary-button" type="button" disabled={busy || job?.state !== "succeeded"} onClick={benchmarkArmDesigns}>{busy ? "Benchmarking designs…" : "Run project benchmark"}</button>{simulationDoc?.engine === "MuJoCo" && simulationDoc.failure_reasons?.length > 0 && <div className="simulation-failures"><strong>Why this run failed</strong><ul>{simulationDoc.failure_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>}{benchmarkDoc?.results && <div className="simulation-benchmark-results"><div><strong>Benchmark result</strong><span>{benchmarkDoc.passed_count}/{benchmarkDoc.design_count} designs passed</span></div>{benchmarkDoc.results.map((result) => <article key={`${result.job_id}-${result.spec_artifact_id || "invalid"}`}><div><strong>{result.design_name}</strong><span className={result.passed ? "benchmark-pass" : "benchmark-fail"}>{result.passed ? "PASS" : "FAIL"}</span></div>{result.metrics && <small>Placement error {(result.metrics.goal_error_m * 1000).toFixed(1)} mm · grasp {result.metrics.grasp_contact_seen ? "contacted" : "missed"} · lift {result.metrics.payload_lifted ? "held" : "failed"} · release {result.metrics.payload_released ? "yes" : "no"}</small>}{result.failure_reasons?.length > 0 && <ul>{result.failure_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>}</article>)}</div>}</section>}
+          {selectedPanel === "canvas" && (job?.robot_class === "tabletop_robot_arm" ? <div className="canvas-specs"><div><span>Robot platform</span><strong>4-DOF tabletop arm</strong></div><div><span>Maximum reach</span><strong>{designSpec ? `${(designSpec.geometry.upper_arm_length_m + designSpec.geometry.forearm_length_m + designSpec.geometry.wrist_length_m).toFixed(2)} m` : "Generating spec"}</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_kg} kg` : "Awaiting design"}</strong></div></div> : isHumanoid ? <div className="canvas-specs"><div><span>Robot platform</span><strong>{designSpec ? `${designSpec.height_m.toFixed(2)} m humanoid` : "Research humanoid"}</strong></div><div><span>Actuated joints</span><strong>31 body · 20 per hand</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_per_arm_kg.toFixed(1)} kg per arm` : "Awaiting design"}</strong></div></div> : isImageDesign ? <div className="canvas-specs"><div><span>Robot concept</span><strong>{designSpec?.title || designSpec?.robot_type || "Image-derived concept"}</strong></div><div><span>Estimated envelope</span><strong>{designSpec?.estimated_dimensions_m ? `${designSpec.estimated_dimensions_m.width.toFixed(2)} × ${designSpec.estimated_dimensions_m.depth.toFixed(2)} × ${designSpec.estimated_dimensions_m.height.toFixed(2)} m` : "Awaiting proposal"}</strong></div><div><span>Concept components</span><strong>{designSpec?.components?.length ? `${designSpec.components.length} visual parts · fixed layout` : "Awaiting proposal"}</strong></div></div> : <div className="canvas-specs"><div><span>Robot platform</span><strong>Differential-drive rover</strong></div><div><span>Route distance</span><strong>{simulationDoc?.distance_m != null ? `${Number(simulationDoc.distance_m).toFixed(1)} m` : "Awaiting simulation"}</strong></div><div><span>Evidence</span><strong>{simulationDoc?.passed ? "Route passed" : simulationDoc ? "Review findings" : "Preview only"}</strong></div></div>)}
         </section>
 
         <aside className="studio-panel activity-panel">
@@ -582,7 +744,7 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
             return <li key={step.state} className={`${complete ? "complete" : ""} ${active ? "current" : ""}`}><span className="workflow-marker">{complete ? "✓" : active ? "•" : String(i + 1).padStart(2, "0")}</span><div><strong>{step.label}</strong>{active && <small>{job.state === "awaiting_review" ? "Your review is needed" : "In progress"}</small>}</div></li>;
           })}</ol>
           <div className="activity-log"><h4>Run events</h4>{events.length === 0 ? <p className="muted">Waiting for workflow events…</p> : events.slice(-5).reverse().map((event) => <div className="activity-event" key={event.id}><span className="event-mark" /><div><strong>{event.state.replace(/_/g, " ")}</strong><small>{new Date(event.created_at).toLocaleTimeString()}</small></div></div>)}</div>
-          <p className="panel-footnote">{isHumanoid ? "Humanoid assembly is a neutral-pose kinematic preview. Balance, gait physics, full collision checks, and hardware safety approval are not implemented." : job?.robot_class === "tabletop_robot_arm" ? "Arm motion is a kinematic preview with a simplified tabletop clearance gate. No physics, complete collision checks, or hardware safety approval." : "Simulation results are estimates for review, not hardware safety approval."}</p>
+          <p className="panel-footnote">{isImageDesign ? "Image-inspired primitive concept geometry. Parts and dimensions are estimates; joints, internals, strength checks, and physics are not included." : isHumanoid ? "Humanoid assembly is a neutral-pose kinematic preview. Balance, gait physics, full collision checks, and hardware safety approval are not implemented." : job?.robot_class === "tabletop_robot_arm" ? "The canvas preview is kinematic. The Simulation panel runs a separate MuJoCo task using estimated primitive geometry; neither output authorizes hardware motion." : "Simulation results are estimates for review, not hardware safety approval."}</p>
         </aside>
       </div>
     </section>

@@ -11,6 +11,9 @@ def store_artifact(job: Job, kind: str, body: str, schema_version: str = "") -> 
     digest = content_hash(body.encode("utf-8"))
     existing = job.artifacts.filter(kind=kind, content_hash=digest).first()
     if existing:
+        if schema_version and existing.schema_version != schema_version:
+            existing.schema_version = schema_version
+            existing.save(update_fields=["schema_version"])
         return existing
     return Artifact.objects.create(
         job=job,
