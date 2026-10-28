@@ -153,6 +153,18 @@ def run_from_approval(job: Job) -> dict:
                     "message": str(exc),
                 }
         store_artifact(job, "cad_export", json.dumps(freecad_result, indent=2), "forgebot-freecad-export/v1")
+        from .fabrication import estimate_3d_print_and_fabrication_costs
+        fab_report = estimate_3d_print_and_fabrication_costs(
+            spec_doc,
+            cad_export=freecad_result if freecad_result.get("status") == "completed" else None,
+            mechatronics=simulation.get("mechatronics"),
+        )
+        enhanced_bom = {
+            "schema_version": "forgebot-bom/v2",
+            "items": bom_doc.get("items", []),
+            "fabrication_estimate": fab_report,
+        }
+        store_artifact(job, "bom", json.dumps(enhanced_bom, indent=2), "forgebot-bom/v2")
         JobEvent.objects.create(
             job=job,
             state=job.state,

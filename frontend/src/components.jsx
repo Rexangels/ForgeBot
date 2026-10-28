@@ -1,6 +1,7 @@
 import React from "react";
 import RoverView from "./RoverView.jsx";
 import MechatronicsPanel from "./MechatronicsPanel.jsx";
+import { FabricationEstimatorPanel } from "./FabricationEstimatorPanel.jsx";
 
 export function StateChip({ state }) {
   return <span className={`chip chip-${state}`}>{state.replace(/_/g, " ")}</span>;
@@ -77,7 +78,7 @@ function downloadBase64(file) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCad = false, onApplyCoDesignEdits }) {
+export function ArtifactViewer({ artifact, cadExport, jobId, onRebuildCad, rebuildingCad = false, onApplyCoDesignEdits, onAskPcbComponent }) {
   if (!artifact) {
     return <p className="muted">Select an artifact to inspect it.</p>;
   }
@@ -148,8 +149,19 @@ export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCa
           {doc.passed ? "Route passed." : "Route failed."} Distance{" "}
           {Number(doc.distance_m).toFixed(2)} m
           {doc.collisions ? `, ${doc.collisions} collision(s)` : ", no collisions"}.
-          {ot ? ` · Trained across ${ot.episodes_run} episodes in a ${ot.obstacles?.length || 0}-obstacle world (converged at Episode ${ot.converged_episode}).` : ""}
+          {ot ? ` · Trained across ${ot.episodes_run} episodes in a ${ot.obstacles?.length || 0}-obstacle world (best policy selected from Episode ${ot.converged_episode}).` : ""}
         </p>
+        {!doc.passed && doc.route_status && (
+          <p className="route-failure-reason" role="status">
+            {doc.route_status.goal_reached === false
+              ? `The selected episode stopped ${Number(doc.route_status.goal_error_m).toFixed(2)} m from the final waypoint (it must finish within 0.22 m).`
+              : !doc.route_status.simulator_checks_passed
+              ? "The route failed the speed or motor limit checks. See the validation findings below."
+              : !doc.route_status.static_stability_passed
+              ? "The center of mass falls outside the support footprint. See the stability findings below."
+              : "The route did not pass all simulation checks. See the validation findings below."}
+          </p>
+        )}
         {mp && stab && dt && (
           <p className="muted">
             Mass: <strong>{Number(mp.total_mass_kg).toFixed(3)} kg</strong> · <span className="term-help" title="Center of mass: the balance point where the robot's mass can be treated as concentrated." tabIndex={0}>CoM</span>{" "}
@@ -470,12 +482,14 @@ export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCa
 
         {doc.mechatronics && (
           <MechatronicsPanel
+            jobId={jobId}
             mechatronics={doc.mechatronics}
             drivetrain={dt}
             onApplyCoDesignEdits={onApplyCoDesignEdits}
             rebuildingCad={rebuildingCad}
             onDownloadText={downloadText}
             onDownloadZip={(zipName, filesObj) => downloadText(zipName, zipStore(filesObj), "application/zip")}
+            onAskPcbComponent={onAskPcbComponent}
           />
         )}
 
@@ -496,6 +510,7 @@ export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCa
           Complete hardware-to-software deployment package combining physics-coupled 3-hour battery sizing, inspectable custom carrier PCB (aligned with your FreeCAD standoffs), pin-to-pin wiring harness, and onboard camera + ultrasonic obstacle avoidance firmware.
         </p>
         <MechatronicsPanel
+          jobId={jobId}
           mechatronics={{
             power_sizing: doc.power_report,
             pcb_wiring: doc.pcb_wiring,
@@ -509,7 +524,31 @@ export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCa
           rebuildingCad={rebuildingCad}
           onDownloadText={downloadText}
           onDownloadZip={(zipName, filesObj) => downloadText(zipName, zipStore(filesObj), "application/zip")}
+          onAskPcbComponent={onAskPcbComponent}
         />
+      </div>
+    );
+  }
+  if (artifact.kind === "bom") {
+    if (doc?.fabrication_estimate) {
+      return (
+        <div>
+          <FabricationEstimatorPanel bom={doc} onDownloadText={downloadText} />
+        </div>
+      );
+    }
+    const items = doc?.items || [];
+    return (
+      <div>
+        <h3>Bill of materials <span className="muted">{artifact.schema_version}</span></h3>
+        <p className="muted">Initial components list proposed by Meta model. Rebuild or approve files to run full OpenCASCADE slicing analysis.</p>
+        <ul className="findings">
+          {items.map((item, index) => (
+            <li key={index}>
+              <strong>{item.name || item.id}</strong> {item.role ? `· ${item.role}` : ""} · Qty {item.quantity || 1}
+            </li>
+          ))}
+        </ul>
       </div>
     );
   }

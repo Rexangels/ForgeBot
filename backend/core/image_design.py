@@ -1570,6 +1570,13 @@ def simulate_image_robot(design: dict) -> dict:
         "engine": f"{ENGINE_NAME} {ENGINE_VERSION} + obstacle world policy trainer & co-design analyzer",
         "waypoints": obstacle_training["course_waypoints"],
         "passed": passed and obstacle_training["best_episode"]["reached_goal"],
+        "route_status": {
+            "passed": passed and obstacle_training["best_episode"]["reached_goal"],
+            "goal_reached": obstacle_training["best_episode"]["reached_goal"],
+            "goal_error_m": obstacle_training["best_episode"].get("goal_error_m"),
+            "simulator_checks_passed": sim.passed,
+            "static_stability_passed": stability_margin_m > 0,
+        },
         "distance_m": obstacle_training["best_episode"]["distance_m"],
         "max_speed_used": speed_m_s,
         "collisions": obstacle_training["best_episode"]["collisions"],

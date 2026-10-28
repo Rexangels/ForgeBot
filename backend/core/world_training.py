@@ -423,6 +423,7 @@ def _simulate_policy_episode(
         "episode": episode_idx,
         "policy_params": {k: round(v, 4) for k, v in params.items()},
         "reached_goal": reached_goal,
+        "goal_error_m": round(goal_error_m, 3),
         "collisions": collisions,
         "collided_obstacles": sorted(collided_ids),
         "min_clearance_m": round(min_clearance_m, 4),

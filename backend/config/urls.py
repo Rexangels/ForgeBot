@@ -73,6 +73,16 @@ urlpatterns = [
         name="inspect-design-component",
     ),
     path(
+        "api/v1/jobs/<int:job_id>/ask-pcb-component",
+        views.ask_pcb_component,
+        name="ask-pcb-component",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/export-pcb-3d",
+        views.export_pcb_3d,
+        name="export-pcb-3d",
+    ),
+    path(
         "api/v1/jobs/<int:job_id>/simulate-arm",
         views.simulate_tabletop_arm,
         name="simulate-tabletop-arm",

@@ -1,4 +1,6 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import PCB3DView from "./PCB3DView.jsx";
+import { api } from "./api.js";
 
 const NET_COLORS = {
   BAT_11V1_RAW: "#f59e0b",
@@ -15,12 +17,14 @@ const NET_COLORS = {
 };
 
 export default function MechatronicsPanel({
+  jobId,
   mechatronics,
   drivetrain,
   onApplyCoDesignEdits,
   rebuildingCad = false,
   onDownloadText,
   onDownloadZip,
+  onAskPcbComponent,
 }) {
   const powerSizing = mechatronics?.power_sizing;
   const pcbWiring = mechatronics?.pcb_wiring;
@@ -32,7 +36,42 @@ export default function MechatronicsPanel({
   const [selectedNet, setSelectedNet] = useState("ALL");
   const [showTopCu, setShowTopCu] = useState(true);
   const [showBotCu, setShowBotCu] = useState(true);
+  const [showWiring3d, setShowWiring3d] = useState(false);
   const [activeCodeFile, setActiveCodeFile] = useState("run_robot.py");
+  const [boardView, setBoardView] = useState("3d");
+  const [selectedFootprint, setSelectedFootprint] = useState(null);
+  const [componentQuestion, setComponentQuestion] = useState("");
+  const [componentAnswer, setComponentAnswer] = useState(null);
+  const [questionBusy, setQuestionBusy] = useState(false);
+  const [questionError, setQuestionError] = useState("");
+  const [nativeModelUrl, setNativeModelUrl] = useState("");
+  const [nativeModelBusy, setNativeModelBusy] = useState(false);
+  const [nativeModelError, setNativeModelError] = useState("");
+  const [nativeModelStatus, setNativeModelStatus] = useState(null);
+
+  useEffect(() => () => {
+    if (nativeModelUrl) URL.revokeObjectURL(nativeModelUrl);
+  }, [nativeModelUrl]);
+
+  const loadNativeModels = async () => {
+    if (!jobId || nativeModelBusy) return;
+    setNativeModelBusy(true);
+    setNativeModelError("");
+    setNativeModelStatus({ state: "loading", count: 0 });
+    try {
+      const glb = await api.exportPcb3d(jobId);
+      const nextUrl = URL.createObjectURL(glb);
+      setNativeModelUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return nextUrl;
+      });
+    } catch (error) {
+      setNativeModelError(error.message || "KiCad could not export the native footprint models.");
+      setNativeModelStatus({ state: "error", count: 0 });
+    } finally {
+      setNativeModelBusy(false);
+    }
+  };
 
   if (!powerSizing || !pcbWiring) {
     return null;
@@ -137,9 +176,27 @@ export default function MechatronicsPanel({
   }, [board]);
 
   const codeFilenames = Object.keys(firmwareFiles);
+  const relatedConnections = selectedFootprint
+    ? (pcbWiring.wiring_connections || []).filter((wire) => (selectedFootprint.pads || []).some((pad) => wire.net_name?.includes(pad.net_name)))
+    : [];
+  const askAboutComponent = async (event) => {
+    event.preventDefault();
+    if (!selectedFootprint || !onAskPcbComponent || questionBusy) return;
+    setQuestionBusy(true);
+    setQuestionError("");
+    setComponentAnswer(null);
+    try {
+      const answer = await onAskPcbComponent(selectedFootprint, relatedConnections, componentQuestion);
+      setComponentAnswer(answer);
+    } catch (error) {
+      setQuestionError(error.message || "Could not answer this component question.");
+    } finally {
+      setQuestionBusy(false);
+    }
+  };
 
   return (
-    <div style={{ marginTop: 18, display: "flex", flexDirection: "column", gap: 18 }}>
+    <div className="mechatronics-panel" style={{ marginTop: 18, display: "flex", flexDirection: "column", gap: 18 }}>
       {/* 1. Interactive 3-Hour Battery & Tire-Weight Sizing Calculator */}
       <section className="cad-validation-panel" style={{ margin: 0 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
@@ -310,7 +367,7 @@ export default function MechatronicsPanel({
       </section>
 
       {/* 2. Inspectable Custom Carrier PCB (.kicad_pcb) & System Wiring Harness */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(380px, 1fr))", gap: 16 }}>
+      <div className="pcb-wiring-layout">
         <section className="cad-validation-panel" style={{ margin: 0 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
             <h4 style={{ margin: 0 }}>
@@ -331,14 +388,68 @@ export default function MechatronicsPanel({
             </div>
           </div>
           <p className="muted" style={{ marginTop: 6 }}>
-            Generated in native KiCad 7/8 S-expression format (<code>.kicad_pcb</code>). The 4× Ø3.2 mm M3 mounting holes match your FreeCAD <code>controller_board</code> standoffs to 0.01 mm. Click any net below to trace it.
+            Generated in native KiCad format (<code>.kicad_pcb</code>). Load installed STEP models for realistic connectors and fuse; the buck module remains an approximation because no exact model is installed.
           </p>
+
+          <div className="pcb-view-toolbar" role="group" aria-label="PCB view options">
+            <div className="pcb-view-switch">
+              <button type="button" className={boardView === "3d" ? "active" : ""} aria-pressed={boardView === "3d"} onClick={() => setBoardView("3d")}>3D assembly</button>
+              <button type="button" className={boardView === "2d" ? "active" : ""} aria-pressed={boardView === "2d"} onClick={() => setBoardView("2d")}>2D traces</button>
+            </div>
+            <label><input type="checkbox" checked={showTopCu} onChange={(e) => setShowTopCu(e.target.checked)} /> Top copper</label>
+            <label><input type="checkbox" checked={showBotCu} onChange={(e) => setShowBotCu(e.target.checked)} /> Bottom copper</label>
+            <label><input type="checkbox" checked={showWiring3d} disabled={boardView !== "3d"} onChange={(e) => setShowWiring3d(e.target.checked)} /> Show wire harness</label>
+            {boardView === "3d" && <button type="button" className="pcb-native-model-button" onClick={loadNativeModels} disabled={!jobId || nativeModelBusy}>{nativeModelBusy ? "Loading KiCad models…" : nativeModelUrl ? "Reload KiCad models" : "Load KiCad 3D models"}</button>}
+          </div>
+          {boardView === "3d" && <p className="pcb-view-note">This layout currently has {board.tracks?.length || 0} routed copper segments, not a full copper pour. Top traces are on this face; bottom traces are on the reverse and show when you orbit underneath. Real solder mask hides most copper; these overlays exaggerate it for inspection. Colored harness leads are separate cables and only run to external connectors. Drag to orbit, scroll to zoom, or use Reset view.</p>}
+
+            {nativeModelError && <p className="error pcb-native-model-error" role="status">{nativeModelError}</p>}
+            {nativeModelStatus?.state === "loading" && <p className="pcb-native-model-note" role="status">KiCad models are being loaded into the 3D view…</p>}
+            {nativeModelStatus?.state === "loaded" && <p className="pcb-native-model-note" role="status">{nativeModelStatus.count} real KiCad STEP models are visible in the assembly. U1 and unmatched parts use the ForgeBot preview.</p>}
+            {nativeModelStatus?.state === "partial" && <p className="pcb-native-model-error" role="status">KiCad export opened, but only {nativeModelStatus.count} of 6 footprint models matched. Unmatched references: {nativeModelStatus.missingRefs?.join(", ")}. Preview parts remain visible.</p>}
+            {nativeModelStatus?.state === "no-match" && <p className="pcb-native-model-error" role="status">The 3D viewer opened the GLB but found no matching footprint references. Expected: {nativeModelStatus.missingRefs?.join(", ")}. First GLB nodes: {nativeModelStatus.nodeNames?.join(", ") || "none"}.</p>}
+            {nativeModelStatus?.state === "load-error" && <p className="pcb-native-model-error" role="status">The KiCad GLB was exported, but the browser could not parse it: {nativeModelStatus.error}.</p>}
+
+          {boardView === "3d" && (
+            <PCB3DView
+              board={board}
+              selectedRef={selectedFootprint?.ref}
+              onSelect={(footprint) => { setSelectedFootprint(footprint); setComponentAnswer(null); }}
+              showTopCu={showTopCu}
+              showBotCu={showBotCu}
+              showWiring={showWiring3d}
+              wiringConnections={pcbWiring.wiring_connections || []}
+              nativeModelUrl={nativeModelUrl}
+                onNativeModelStatus={setNativeModelStatus}
+            />
+          )}
+
+          <div className="pcb-component-list" aria-label="Select a PCB component">
+            {(board.footprints || []).map((footprint) => <button key={footprint.ref} type="button" className={selectedFootprint?.ref === footprint.ref ? "active" : ""} aria-pressed={selectedFootprint?.ref === footprint.ref} onClick={() => { setSelectedFootprint(footprint); setComponentAnswer(null); }}><strong>{footprint.ref}</strong><span>{footprint.role || footprint.label}</span></button>)}
+          </div>
+
+          {selectedFootprint && (
+            <section className="pcb-component-inspector" aria-live="polite">
+              <div className="pcb-component-title">
+                <div><p className="eyebrow">SELECTED PCB COMPONENT</p><h5>{selectedFootprint.ref} · {selectedFootprint.role || selectedFootprint.label}</h5><small>{selectedFootprint.footprint_lib}</small></div>
+                <span>{selectedFootprint.width_mm} × {selectedFootprint.height_mm} mm footprint</span>
+              </div>
+              <div className="pcb-pad-list"><strong>Pads and nets</strong>{(selectedFootprint.pads || []).map((pad) => <span key={`${selectedFootprint.ref}-${pad.num}`}>{pad.num} · {pad.name} <b>{pad.net_name}</b></span>)}</div>
+              {onAskPcbComponent && <form className="pcb-question-form" onSubmit={askAboutComponent}>
+                <label htmlFor="pcb-component-question">Ask about {selectedFootprint.ref}</label>
+                <div><input id="pcb-component-question" value={componentQuestion} onChange={(event) => setComponentQuestion(event.target.value)} placeholder="What does this part do? How is it connected?" maxLength={1000} /><button className="artifact-download" disabled={questionBusy}>{questionBusy ? "Thinking…" : "Ask"}</button></div>
+                {questionError && <p className="error">{questionError}</p>}
+                {componentAnswer && <div className="pcb-answer"><strong>{componentAnswer.answer}</strong>{componentAnswer.known_from_design?.length > 0 && <p><b>From the design:</b> {componentAnswer.known_from_design.join(" · ")}</p>}{componentAnswer.unknown_or_unverified?.length > 0 && <p><b>Not confirmed:</b> {componentAnswer.unknown_or_unverified.join(" · ")}</p>}</div>}
+              </form>}
+            </section>
+          )}
 
           {/* Net Filter Pills */}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 8 }}>
             {allNets.map((net) => (
               <button
                 key={net}
+                className="net-filter-chip"
                 type="button"
                 onClick={() => setSelectedNet(net)}
                 style={{
@@ -358,7 +469,7 @@ export default function MechatronicsPanel({
           </div>
 
           {/* Interactive 2D PCB Canvas (SVG) */}
-          <div
+          {boardView === "2d" && <div
             style={{
               marginTop: 10,
               background: "#071318",
@@ -480,7 +591,7 @@ export default function MechatronicsPanel({
                 </g>
               ))}
             </svg>
-          </div>
+          </div>}
 
           {/* KiCad Download Buttons */}
           {onDownloadText && pcbWiring.kicad_files && (
@@ -564,6 +675,7 @@ export default function MechatronicsPanel({
             {(pcbWiring.erc_checks || []).map((chk) => (
               <div
                 key={chk.code}
+                className="erc-check"
                 style={{
                   padding: "6px 10px",
                   borderRadius: 6,
@@ -606,6 +718,8 @@ export default function MechatronicsPanel({
             {codeFilenames.map((fname) => (
               <button
                 key={fname}
+                className="firmware-file-tab"
+                aria-pressed={activeCodeFile === fname}
                 type="button"
                 onClick={() => setActiveCodeFile(fname)}
                 style={{

@@ -57,6 +57,19 @@ export const api = {
   editCadSketches: (jobId, components) => req("POST", `/api/v1/jobs/${jobId}/edit-cad-sketches`, { components }),
   proposeCadSketchEdit: (jobId, componentId, instruction) => req("POST", `/api/v1/jobs/${jobId}/propose-cad-sketch-edit`, { component_id: componentId, instruction }),
   inspectComponent: (jobId, componentId, question = "") => req("POST", `/api/v1/jobs/${jobId}/inspect-component`, { component_id: componentId, question }),
+  askPcbComponent: (jobId, component, connections, question = "") => req("POST", `/api/v1/jobs/${jobId}/ask-pcb-component`, { component, connections, question }),
+  exportPcb3d: async (jobId) => {
+    const res = await fetch(`/api/v1/jobs/${jobId}/export-pcb-3d`, {
+      method: "POST",
+      headers: { "X-CSRFToken": getCookie("csrftoken") },
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      throw new Error(data?.error || `KiCad 3D export failed (${res.status})`);
+    }
+    return res.blob();
+  },
   proposeDesignRevision: (jobId, instruction = "") => req("POST", `/api/v1/jobs/${jobId}/propose-design-revision`, { instruction }),
   applyDesignRevision: (jobId, proposal) => req("POST", `/api/v1/jobs/${jobId}/apply-design-revision`, { proposal }),
   artifact: (artifactId) => req("GET", `/api/v1/artifacts/${artifactId}`),

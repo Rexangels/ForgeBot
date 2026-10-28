@@ -8,6 +8,16 @@ import math
 from typing import Any
 
 
+KICAD_3D_MODELS = {
+    "J1_BAT": "Connector_AMASS.3dshapes/AMASS_XT60-M_1x02_P7.2mm_Vertical.step",
+    "F1_FUSE": "Fuse.3dshapes/Fuseholder_Blade_Mini_Keystone_3568.step",
+    "J2_SBC": "Connector_PinSocket_2.54mm.3dshapes/PinSocket_2x20_P2.54mm_Vertical.step",
+    "J3_MDRV": "Connector_JST.3dshapes/JST_XH_B6B-XH-A_1x06_P2.50mm_Vertical.step",
+    "J4_SONAR_L": "Connector_JST.3dshapes/JST_XH_B4B-XH-A_1x04_P2.50mm_Vertical.step",
+    "J5_SONAR_R": "Connector_JST.3dshapes/JST_XH_B4B-XH-A_1x04_P2.50mm_Vertical.step",
+}
+
+
 def _find_component(components: list[dict[str, Any]], keywords: tuple[str, ...]) -> dict[str, Any] | None:
     for comp in components:
         label = f"{comp.get('id', '')} {comp.get('name', '')} {comp.get('role', '')}".lower()
@@ -280,6 +290,15 @@ def _build_kicad_pcb_sexpr(
                 f'    (pad "{pad["num"]}" thru_hole circle (at {pad["dx_mm"]:.2f} {pad["dy_mm"]:.2f})'
                 f' (size 1.75 1.75) (drill 0.95) (layers "*.Cu") (net {pad["net_id"]} "{pad["net_name"]}"))'
             )
+        # Saved simulation artifacts can predate native KiCad model support and
+        # therefore lack model_path. Resolve known footprints here as well as
+        # during generation so exports from existing projects include STEP models.
+        model_path = fp.get("model_path") or KICAD_3D_MODELS.get(fp.get("ref"))
+        if model_path:
+            lines.append(
+                f'    (model "${{KICAD10_3DMODEL_DIR}}/{model_path}" '
+                '(offset (xyz 0 0 0)) (scale (xyz 1 1 1)) (rotate (xyz 0 0 0)))'
+            )
         lines.append("  )")
 
     for tr in tracks:
@@ -359,6 +378,32 @@ def generate_pcb_and_wiring_architecture(
     buck_5v_trace_w_mm = 1.00
     signal_trace_w_mm = 0.30
 
+    # The Pi/SBC header is a real 2x20, 2.54 mm pitch connector. Keep all
+    # forty drilled pads on the generated carrier and attach the selected
+    # power/control nets to their physical header positions.
+    sbc_pin_nets = {
+        1: {"name": "3V3_OUT", "net_id": 4, "net_name": "VCC_3V3_LOGIC"},
+        2: {"name": "5V_IN", "net_id": 3, "net_name": "VCC_5V_BUCK"},
+        6: {"name": "GND", "net_id": 5, "net_name": "GND"},
+        11: {"name": "GPIO17_TRIG_R", "net_id": 10, "net_name": "GPIO17_SONAR_TRIG_R"},
+        13: {"name": "GPIO27_ECHO_R", "net_id": 11, "net_name": "GPIO27_SONAR_ECHO_R_3V3"},
+        16: {"name": "GPIO23_TRIG_L", "net_id": 8, "net_name": "GPIO23_SONAR_TRIG_L"},
+        18: {"name": "GPIO24_ECHO_L", "net_id": 9, "net_name": "GPIO24_SONAR_ECHO_L_3V3"},
+        32: {"name": "GPIO12_PWM_L", "net_id": 6, "net_name": "GPIO12_PWM_L"},
+        33: {"name": "GPIO13_PWM_R", "net_id": 7, "net_name": "GPIO13_PWM_R"},
+    }
+    sbc_pads = [
+        {
+            "num": str(pin_num),
+            "name": sbc_pin_nets.get(pin_num, {}).get("name", "NC"),
+            "dx_mm": -1.27 if pin_num % 2 else 1.27,
+            "dy_mm": round(((pin_num - 1) // 2 - 9.5) * 2.54, 2),
+            "net_id": sbc_pin_nets.get(pin_num, {}).get("net_id", 0),
+            "net_name": sbc_pin_nets.get(pin_num, {}).get("net_name", ""),
+        }
+        for pin_num in range(1, 41)
+    ]
+
     footprints = [
         {
             "ref": "J1_BAT",
@@ -411,22 +456,12 @@ def generate_pcb_and_wiring_architecture(
             "label": "RPI_GPIO_40P",
             "role": "40-Pin 2.54mm Motherboard Header (5V Power + 3.3V GPIO)",
             "footprint_lib": "Connector_PinSocket_2.54mm:PinSocket_2x20_P2.54mm_Vertical",
-            "x_mm": round(board_w_mm * 0.12, 1),
-            "y_mm": round(board_h_mm * 0.04, 1),
-            "width_mm": 28.0,
-            "height_mm": 10.0,
+            "x_mm": round(board_w_mm * 0.07, 1),
+            "y_mm": 0.0,
+            "width_mm": 5.08,
+            "height_mm": 50.8,
             "color": "#10b981",
-            "pads": [
-                {"num": "2", "name": "5V_IN", "dx_mm": -10.0, "dy_mm": -2.0, "net_id": 3, "net_name": "VCC_5V_BUCK"},
-                {"num": "1", "name": "3V3_OUT", "dx_mm": -10.0, "dy_mm": 2.0, "net_id": 4, "net_name": "VCC_3V3_LOGIC"},
-                {"num": "6", "name": "GND", "dx_mm": -6.0, "dy_mm": -2.0, "net_id": 5, "net_name": "GND"},
-                {"num": "32", "name": "GPIO12_PWM_L", "dx_mm": -2.0, "dy_mm": -2.0, "net_id": 6, "net_name": "GPIO12_PWM_L"},
-                {"num": "33", "name": "GPIO13_PWM_R", "dx_mm": 2.0, "dy_mm": 2.0, "net_id": 7, "net_name": "GPIO13_PWM_R"},
-                {"num": "16", "name": "GPIO23_TRIG_L", "dx_mm": 6.0, "dy_mm": -2.0, "net_id": 8, "net_name": "GPIO23_SONAR_TRIG_L"},
-                {"num": "18", "name": "GPIO24_ECHO_L", "dx_mm": 6.0, "dy_mm": 2.0, "net_id": 9, "net_name": "GPIO24_SONAR_ECHO_L_3V3"},
-                {"num": "11", "name": "GPIO17_TRIG_R", "dx_mm": 10.0, "dy_mm": -2.0, "net_id": 10, "net_name": "GPIO17_SONAR_TRIG_R"},
-                {"num": "13", "name": "GPIO27_ECHO_R", "dx_mm": 10.0, "dy_mm": 2.0, "net_id": 11, "net_name": "GPIO27_SONAR_ECHO_R_3V3"},
-            ],
+            "pads": sbc_pads,
         },
         {
             "ref": "J3_MDRV",
@@ -481,6 +516,9 @@ def generate_pcb_and_wiring_architecture(
             ],
         },
     ]
+
+    for footprint in footprints:
+        footprint["model_path"] = KICAD_3D_MODELS.get(footprint["ref"])
 
     fp_by_ref = {f["ref"]: f for f in footprints}
 
