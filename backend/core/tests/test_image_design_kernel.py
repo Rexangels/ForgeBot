@@ -42,3 +42,21 @@ class ImageDesignKernelTests(SimpleTestCase):
         self.assertIn("1250.0", prompt)
         self.assertIn("left_wheel", prompt)
         self.assertTrue(proposal["requires_human_review"])
+
+    def test_mechanical_fastener_holes_in_cad_exports(self):
+        package = generate_cad_package(small_design())
+        # Check OpenSCAD part has physical difference() through-hole cuts
+        base_scad = package["files"]["parts/base.scad"]
+        self.assertIn("difference()", base_scad)
+        self.assertIn("4x M3 fastener clearance holes", base_scad)
+        self.assertIn("cylinder(", base_scad)
+
+        # Check FreeCAD macro includes inner circle geometries in sketch
+        macro = package["files"]["freecad/build_step.FCMacro"]
+        self.assertIn("Part.Circle(App.Vector(", macro)
+        self.assertIn("hole_r = 1.7", macro)
+
+        # Check manifest interfaces
+        manifest_raw = package["files"]["manifest.json"]
+        self.assertIn("modeled_cut", manifest_raw)
+        self.assertIn('"fastener": "M3"', manifest_raw)

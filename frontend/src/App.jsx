@@ -153,10 +153,45 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
   const [calibration, setCalibration] = useState(null);
   const [selectedObject, setSelectedObject] = useState(0);
   const [targetEdit, setTargetEdit] = useState({ x: 0.3, y: 0, z: 0.04 });
+  const [calibrationAccuracy, setCalibrationAccuracy] = useState(null);
+  const [trackedObjects, setTrackedObjects] = useState([]);
+  const [measuredDepth, setMeasuredDepth] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    api.latestCalibration(projectId)
+      .then((saved) => {
+        if (cancelled) return;
+        setCalibration(saved.homography);
+        setCalibrationPoints(saved.image_points || []);
+        setCalibrationAccuracy(saved.accuracy_m || null);
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [projectId]);
   const [designBrief, setDesignBrief] = useState("Create an original compact robot inspired by this image. Keep the visible silhouette and component arrangement, but make the design suitable for a simple research prototype.");
   const [designHeight, setDesignHeight] = useState(0.45);
   const [designConstraints, setDesignConstraints] = useState("");
   const [designBusy, setDesignBusy] = useState(false);
+  const [designViews, setDesignViews] = useState([]);
+  const [designLocalOnly, setDesignLocalOnly] = useState(false);
+
+  const addDesignView = (file) => {
+    if (!file || designViews.length >= 3) return;
+    const defaults = ["front", "side", "top"];
+    setDesignViews((previous) => [...previous, { file, url: URL.createObjectURL(file), view: defaults[previous.length] || "other" }]);
+    setError("");
+  };
+  const removeDesignView = (index) => {
+    setDesignViews((previous) => {
+      const removed = previous[index];
+      if (removed) URL.revokeObjectURL(removed.url);
+      return previous.filter((_, i) => i !== index);
+    });
+  };
+  const setDesignViewLabel = (index, view) => {
+    setDesignViews((previous) => previous.map((item, i) => i === index ? { ...item, view } : item));
+  };
 
   const selectReferenceImage = (file) => {
     if (!file) return;
@@ -164,7 +199,9 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
     setObservation(null);
     setError("");
     setCalibration(null);
+    setCalibrationAccuracy(null);
     setCalibrationPoints([]);
+    setTrackedObjects([]);
     onUseTarget(null);
   };
 
@@ -242,7 +279,15 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
     try {
       const response = await api.analyzeScene(image);
       setObservation(response.observation);
+      const objects = response.observation?.objects || [];
+      try {
+        const matched = await api.trackDetections(trackedObjects, objects);
+        setTrackedObjects(matched.tracks || objects);
+      } catch {
+        setTrackedObjects(objects);
+      }
       setCalibration(null);
+      setCalibrationAccuracy(null);
       setCalibrationPoints([]);
       setSelectedObject(0);
     } catch (err) {
@@ -253,11 +298,11 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
   };
 
   const createImageDesign = async () => {
-    if (!image || !designBrief.trim()) return;
+    if (!designViews.length || !designBrief.trim()) return;
     setDesignBusy(true);
     setError("");
     try {
-      const created = await api.createImageDesign(projectId, image, { brief: designBrief, targetHeightM: designHeight, constraints: designConstraints });
+      const created = await api.createImageDesign(projectId, designViews, { brief: designBrief, targetHeightM: designHeight, constraints: designConstraints, localOnly: designLocalOnly });
       onOpenJob(created.id);
     } catch (err) {
       setError(err.message);
@@ -274,11 +319,19 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
     setCalibrationPoints((previous) => [...previous, point]);
   };
 
-  const finishCalibration = () => {
+  const finishCalibration = async () => {
     try {
-      setCalibration(solvePlanarHomography(calibrationPoints, WORK_AREA_CORNERS));
+      const homography = solvePlanarHomography(calibrationPoints, WORK_AREA_CORNERS);
+      setCalibration(homography);
       setCalibrating(false);
       setError("");
+      try {
+        const saved = await api.saveCalibration(projectId, { label: "workcell", image_points: calibrationPoints, world_points: WORK_AREA_CORNERS });
+        setCalibrationAccuracy(saved.accuracy_m || null);
+      } catch (saveErr) {
+        setCalibrationAccuracy(null);
+        setError(`Calibration applied locally but not saved: ${saveErr.message}`);
+      }
     } catch (err) {
       setError(err.message);
     }
@@ -295,12 +348,13 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
             <button className="primary-action" disabled={!image || busy || cameraActive} onClick={analyze}>{busy ? "Analyzing image…" : "Ask Meta to inspect →"}</button>
           </div>
           <div className="image-design-card"><div><span className="eyebrow">IMAGE-TO-ROBOT CONCEPT</span><strong>Design a robot from this reference</strong><small>Meta proposes the visible shape and part layout. ForgeBot builds separate editable part modules, an assembled CAD source, URDF, and a 3D concept for review.</small></div>
-            <div className="design-reference-picker"><label htmlFor="robot-reference-image">Robot reference image</label><label className="design-reference-button" htmlFor="robot-reference-image">{image ? "Replace reference image" : "Choose a robot image"}<input id="robot-reference-image" type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { selectReferenceImage(event.target.files?.[0]); event.target.value = ""; }} /></label>{image ? <div className="design-reference-selected"><img src={previewUrl} alt="Selected robot design reference" /><span><strong>{image.name}</strong><small>Shared with AI eyes · this image will guide robot concept generation</small></span></div> : <small className="image-design-note">Choose a robot photo or reference illustration. The same image is available to AI eyes for scene understanding.</small>}</div>
+            <div className="design-reference-picker"><label htmlFor="robot-reference-image">Robot reference views · up to 3</label><label className="design-reference-button" htmlFor="robot-reference-image">{designViews.length >= 3 ? "Three views selected" : "Add a front, side, or top view"}<input id="robot-reference-image" type="file" accept="image/jpeg,image/png,image/webp" disabled={designViews.length >= 3} onChange={(event) => { addDesignView(event.target.files?.[0]); event.target.value = ""; }} /></label>{designViews.length ? <div className="design-reference-views">{designViews.map((item, index) => <div className="design-reference-selected" key={`${item.file.name}-${index}`}><img src={item.url} alt={`Reference view ${index + 1}`} /><span><strong>{item.file.name}</strong><label>Viewpoint<select value={item.view} onChange={(event) => setDesignViewLabel(index, event.target.value)}><option value="front">Front</option><option value="side">Side</option><option value="top">Top</option><option value="other">Other</option></select></label><button className="secondary-action" type="button" onClick={() => removeDesignView(index)}>Remove</button></span></div>)}</div> : <small className="image-design-note">Add one photo, or three labeled viewpoints so widths, depths, and footprints stop being guesses. The workcell image above stays available to AI eyes separately.</small>}</div>
             <label>What should the robot do?<textarea rows={3} maxLength={2000} value={designBrief} onChange={(event) => setDesignBrief(event.target.value)} /></label>
             <div className="target-edit-grid"><label>Approximate robot height (m)<input type="number" min="0.05" max="3" step="0.01" value={designHeight} onChange={(event) => setDesignHeight(Number(event.target.value))} /></label></div>
             <label>Constraints (optional)<input maxLength={2000} value={designConstraints} onChange={(event) => setDesignConstraints(event.target.value)} placeholder="Budget, workspace, wheels or legs, payload…" /></label>
-            <button className="primary-action" disabled={!image || !designBrief.trim() || designBusy || cameraActive} onClick={createImageDesign}>{designBusy ? "Sending reference to Meta…" : "Generate robot concept →"}</button>
-            <small className="image-design-note">The image is sent to Meta only when you generate. The model does not recover true dimensions or hidden mechanisms. No reference image is retained by ForgeBot.</small>
+            <label className="image-design-note" style={{ display: "flex", gap: "6px", alignItems: "flex-start" }}><input type="checkbox" checked={designLocalOnly} onChange={(event) => setDesignLocalOnly(event.target.checked)} /> Keep reference pixels on this machine (text-only brief, less accurate proportions)</label>
+            <button className="primary-action" disabled={!designViews.length || !designBrief.trim() || designBusy || cameraActive} onClick={createImageDesign}>{designBusy ? (designLocalOnly ? "Designing from text brief…" : "Sending references to Meta…") : "Generate robot concept →"}</button>
+            <small className="image-design-note">{designLocalOnly ? "Local-only: reference pixels stay on this machine; the concept is designed from your brief plus local view facts. Expect rougher proportions." : "Reference views are sent to Meta only when you generate."} The model does not recover true dimensions or hidden mechanisms. No reference image is retained by ForgeBot.</small>
           </div>
           {error && <p className="error">{error}</p>}
           <p className="vision-privacy">Images are sent to Meta only when you select <strong>Ask Meta</strong>. ForgeBot does not store the image or analysis. Use a non-sensitive workcell image.</p>
@@ -308,9 +362,9 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
         <div className="vision-results">
           {!observation ? <div className="vision-empty result-empty"><strong>Scene understanding will appear here</strong><small>Includes object appearance, condition, image regions, relationships, and uncertainty.</small></div> : <>
             <div className="scene-summary"><span className="eyebrow">SCENE SUMMARY</span><p>{observation.scene_summary}</p><small>{observation.work_surface?.description || "Work surface not confidently identified"}</small></div>
-            <div className="object-list"><div className="object-list-heading"><strong>Visible objects</strong><span>{observation.objects.length}</span></div>{observation.objects.map((object, index) => <article className="vision-object" key={`${object.label}-${index}`}><div><strong>{object.label}</strong><span className={`confidence-tag ${object.graspability}`}>{Math.round(object.confidence * 100)}% · {object.graspability.replace(/_/g, " ")}</span></div><p>{object.appearance} {object.state}</p>{object.uncertainty && <small>Uncertainty: {object.uncertainty}</small>}</article>)}</div>
-            <div className="calibration-card"><div><strong>Map the image to the arm workspace</strong><small>Click the four table corners in this order: X−/Y−, X+/Y−, X+/Y+, X−/Y+. Bounds are −0.1..0.7 m by −0.3..0.3 m in the arm-base frame. This assumes the arm base is at (0,0), 0.1 m from the table’s X− edge and centered across its width.</small></div><div className="calibration-actions"><button className="secondary-action" onClick={() => { setCalibration(null); setCalibrationPoints([]); setCalibrating(true); setError(""); }}>Calibrate from table corners</button>{calibrating && <><span>{calibrationPoints.length}/4 corners</span><button className="secondary-action" disabled={calibrationPoints.length !== 4} onClick={finishCalibration}>Apply calibration</button><button className="link" onClick={() => { setCalibrating(false); setCalibrationPoints([]); }}>Cancel</button></>}</div>{calibration && <p className="calibration-ok">Planar calibration ready · positions are estimates at the table surface.</p>}</div>
-            {observation.objects.length > 0 && <div className="object-target"><label>Object to target<select value={selectedObject} onChange={(event) => setSelectedObject(Number(event.target.value))}>{observation.objects.map((object, index) => <option key={`${object.label}-${index}`} value={index}>{object.label}</option>)}</select></label>{mappedObject ? <><p>Estimated from box lower-center: X {mappedObject.x.toFixed(3)} m · Y {mappedObject.y.toFixed(3)} m</p><div className="target-edit-grid">{["x", "y", "z"].map((axis) => <label key={axis}>{axis.toUpperCase()} m<input type="number" step="0.005" value={targetEdit[axis]} onChange={(event) => setTargetEdit((old) => ({ ...old, [axis]: Number(event.target.value) }))} /></label>)}</div><button className="secondary-action" onClick={() => onUseTarget({ ...targetEdit, source: "Meta vision estimate · manually review before motion", label: observation.objects[selectedObject].label })}>Use reviewed estimate as pick target</button><small>Metric location is inferred through your four-corner calibration. Review and adjust the coordinates before using it.</small></> : <small>Calibrate the tabletop before converting this image observation into a robot-frame target.</small>}</div>}
+            <div className="object-list"><div className="object-list-heading"><strong>Visible objects</strong><span>{observation.objects.length}</span></div>{observation.objects.map((object, index) => { const track = trackedObjects[index]; const sameTrack = track && track.label === object.label ? track : null; return <article className="vision-object" key={`${object.label}-${index}`}><div><strong>{object.label}{sameTrack?.track_id ? ` #${sameTrack.track_id}` : ""}</strong><span className={`confidence-tag ${object.graspability}`}>{Math.round(object.confidence * 100)}% · {object.graspability.replace(/_/g, " ")}{sameTrack?.frames_seen > 1 ? ` · seen ${sameTrack.frames_seen} frames` : ""}</span></div><p>{object.appearance} {object.state}</p>{object.uncertainty && <small>Uncertainty: {object.uncertainty}</small>}</article>; })}</div>
+            <div className="calibration-card"><div><strong>Map the image to the arm workspace</strong><small>Click the four table corners in this order: X−/Y−, X+/Y−, X+/Y+, X−/Y+. Bounds are −0.1..0.7 m by −0.3..0.3 m in the arm-base frame. This assumes the arm base is at (0,0), 0.1 m from the table’s X− edge and centered across its width.</small></div><div className="calibration-actions"><button className="secondary-action" onClick={() => { setCalibration(null); setCalibrationPoints([]); setCalibrating(true); setError(""); }}>Calibrate from table corners</button>{calibrating && <><span>{calibrationPoints.length}/4 corners</span><button className="secondary-action" disabled={calibrationPoints.length !== 4} onClick={finishCalibration}>Apply calibration</button><button className="link" onClick={() => { setCalibrating(false); setCalibrationPoints([]); }}>Cancel</button></>}</div>{calibration && <p className="calibration-ok">Planar calibration ready · positions are estimates at the table surface.{calibrationAccuracy ? ` Measured click accuracy: mean ${(calibrationAccuracy.mean_m * 1000).toFixed(1)} mm, worst ${(calibrationAccuracy.max_m * 1000).toFixed(1)} mm across held-out corners.` : " Accuracy not measured for this session."}</p>}</div>
+            {observation.objects.length > 0 && <div className="object-target"><label>Object to target<select value={selectedObject} onChange={(event) => setSelectedObject(Number(event.target.value))}>{observation.objects.map((object, index) => <option key={`${object.label}-${index}`} value={index}>{object.label}</option>)}</select></label>{mappedObject ? <><p>Estimated from box lower-center: X {mappedObject.x.toFixed(3)} m · Y {mappedObject.y.toFixed(3)} m</p><div className="target-edit-grid">{["x", "y", "z"].map((axis) => <label key={axis}>{axis.toUpperCase()} m<input type="number" step="0.005" value={targetEdit[axis]} onChange={(event) => setTargetEdit((old) => ({ ...old, [axis]: Number(event.target.value) }))} /></label>)}</div><label>Measured depth m (optional)<input type="number" min="0.005" max="1" step="0.005" placeholder="0.04" value={measuredDepth} onChange={(event) => { setMeasuredDepth(event.target.value); const depth = Number(event.target.value); if (Number.isFinite(depth) && depth > 0) setTargetEdit((old) => ({ ...old, z: depth })); }} /></label><button className="secondary-action" onClick={() => onUseTarget({ ...targetEdit, source: measuredDepth ? "Measured depth (user-supplied) · manually review before motion" : "Meta vision estimate on assumed 40 mm plane · manually review before motion", depth_source: measuredDepth ? "measured" : "assumed_plane_40mm", label: observation.objects[selectedObject].label })}>Use reviewed estimate as pick target</button><small>Metric location is inferred through your four-corner calibration{calibrationAccuracy ? ` (worst held-out corner ${(calibrationAccuracy.max_m * 1000).toFixed(1)} mm)` : ""}. Depth defaults to the 40 mm plane unless you measured it. Review and adjust the coordinates before using it.</small></> : <small>Calibrate the tabletop before converting this image observation into a robot-frame target.</small>}</div>}
             {observation.relationships.length > 0 && <div className="scene-summary"><span className="eyebrow">SPATIAL RELATIONSHIPS</span><ul>{observation.relationships.map((relation) => <li key={relation}>{relation}</li>)}</ul></div>}
             {observation.safety_notes.length > 0 && <div className="vision-caution"><strong>Visible cautions</strong><ul>{observation.safety_notes.map((note) => <li key={note}>{note}</li>)}</ul></div>}
           </>}
@@ -582,11 +636,13 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
     setError("");
     try {
       const result = await api.editCadSketches(jobId, components);
-      const artifactIds = [result.spec_artifact_id, result.urdf_artifact_id, result.artifact_id, result.freecad_artifact_id].filter(Boolean);
+      const artifactIds = [result.spec_artifact_id, result.urdf_artifact_id, result.artifact_id, result.freecad_artifact_id, result.sim_artifact_id, result.code_artifact_id].filter(Boolean);
       const artifacts = await Promise.all(artifactIds.map((artifactId) => api.artifact(artifactId)));
       setBodies((previous) => ({ ...previous, ...Object.fromEntries(artifacts.map((artifact) => [artifact.id, artifact])) }));
       await refresh();
-      setSelectedPanel("assembly");
+      if (selectedPanel !== "simulation" && selectedPanel !== "code") {
+        setSelectedPanel("assembly");
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -676,6 +732,35 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
       setBusy(false);
     }
   };
+  const proposeDesignRevision = async (instruction = "") => {
+    setBusy(true);
+    setError("");
+    try {
+      return await api.proposeDesignRevision(jobId, instruction);
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const applyDesignRevision = async (proposal) => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.applyDesignRevision(jobId, proposal);
+      const artifactIds = [result.spec_artifact_id, result.urdf_artifact_id, result.artifact_id, result.freecad_artifact_id].filter(Boolean);
+      const artifacts = await Promise.all(artifactIds.map((artifactId) => api.artifact(artifactId)));
+      setBodies((previous) => ({ ...previous, ...Object.fromEntries(artifacts.map((artifact) => [artifact.id, artifact])) }));
+      await refresh();
+      setSelectedPanel("assembly");
+    } catch (err) {
+      setError(err.message);
+      throw err;
+    } finally {
+      setBusy(false);
+    }
+  };
   const isHumanoid = job?.robot_class === "research_humanoid";
   const isImageDesign = job?.robot_class === "image_robot_design";
   const workflowSteps = isImageDesign
@@ -708,7 +793,61 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
   const isFailed = job?.state === "failed" || job?.state === "cancelled";
   return (
     <section className="workbench job-workbench">
-      <div className="workbench-titlebar"><button className="link" onClick={onBack}>← Project workspace</button><div className="job-title"><div><p className="eyebrow">BUILD SESSION · #{jobId}</p><h2>{job?.robot_class === "tabletop_robot_arm" ? "Tabletop arm design" : isHumanoid ? "Research humanoid concept" : isImageDesign ? "Image-guided robot concept" : "Robot prototype"}</h2></div>{job && <StateChip state={job.state} />}</div></div>
+      <div className="workbench-titlebar" style={{ flexWrap: "wrap", gap: "12px" }}>
+        <button className="link" onClick={onBack}>← Project workspace</button>
+        <div className="job-title" style={{ flex: 1, minWidth: "280px" }}>
+          <div>
+            <p className="eyebrow">BUILD SESSION · #{jobId} · {designSpec?.title || (isImageDesign ? "Image-to-CAD Mechatronics" : "Robot Prototype")}</p>
+            <h2>{designSpec?.title || (job?.robot_class === "tabletop_robot_arm" ? "Tabletop arm design" : isHumanoid ? "Research humanoid concept" : isImageDesign ? "Image-guided robot concept" : "Robot prototype")}</h2>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", background: "rgba(15, 23, 42, 0.85)", border: "1px solid rgba(56, 189, 248, 0.35)", borderRadius: "999px", padding: "4px 12px", fontSize: "11px", color: "#e2e8f0" }}>
+              <span style={{ color: "#38bdf8", fontWeight: 700 }}>✦ Meta AI ({job?.model || "muse-spark"})</span>
+              <span style={{ color: "#475569" }}>·</span>
+              <span style={{ color: "#a7f3d0" }}>⬡ FreeCAD 1.0</span>
+              <span style={{ color: "#475569" }}>·</span>
+              <span style={{ color: "#fde68a" }}>⚙ MuJoCo 3.17</span>
+              <span style={{ color: "#475569" }}>·</span>
+              <span style={{ color: "#c4b5fd" }}>⚡ KiCad 8.0 + ROS 2</span>
+            </div>
+            {job && <StateChip state={job.state} />}
+          </div>
+        </div>
+      </div>
+      {isImageDesign && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap", padding: "8px 14px", marginBottom: "12px", background: "linear-gradient(90deg, rgba(15, 23, 42, 0.92), rgba(30, 41, 59, 0.85))", border: "1px solid rgba(56, 189, 248, 0.28)", borderRadius: "10px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "#cbd5e1" }}>
+            <span style={{ background: "rgba(56, 189, 248, 0.18)", color: "#38bdf8", border: "1px solid rgba(56, 189, 248, 0.4)", borderRadius: "6px", padding: "2px 8px", fontWeight: 700, fontSize: "11px" }}>STAGE FLOW</span>
+            <span>Jump between hardware inspection, physics + onboard vision, and closed-loop co-design:</span>
+          </div>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            {[
+              { id: "assembly", label: "1. ⬡ 3D CAD & M3 Hole Inspector" },
+              { id: "simulation", label: "2. ◉ MuJoCo World, Vision PIP & Co-Design" },
+              { id: "code", label: "3. ‹/› ROS 2, OpenCV & Firmware" },
+              { id: "cad", label: "4. ⌁ KiCad PCB & Wiring Harness" },
+            ].map((pill) => (
+              <button
+                key={pill.id}
+                type="button"
+                onClick={() => openPanel(pill.id)}
+                style={{
+                  background: selectedPanel === pill.id ? "linear-gradient(135deg, #0284c7, #2563eb)" : "rgba(30, 41, 59, 0.9)",
+                  color: selectedPanel === pill.id ? "#ffffff" : "#cbd5e1",
+                  border: selectedPanel === pill.id ? "1px solid #38bdf8" : "1px solid rgba(148, 163, 184, 0.3)",
+                  borderRadius: "8px",
+                  padding: "5px 11px",
+                  fontSize: "11.5px",
+                  fontWeight: selectedPanel === pill.id ? 700 : 500,
+                  cursor: "pointer",
+                }}
+              >
+                {pill.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {error && <p className="error">{error}</p>}
       {job?.state === "awaiting_review" && <div className="review-banner"><div><strong>Design proposal is ready for your review</strong><span>Check the specification and parts list before generating robot files.</span></div><button onClick={approve} disabled={busy}>{busy ? "Building files…" : "Approve & continue →"}</button></div>}
       <div className="job-studio-grid">
@@ -723,15 +862,15 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
             const sublabel = found && item.key === "simulation" && isHumanoid ? "Physics not run" : found ? item.sub : unavailableLabel;
             return <button key={item.key} className={`asset-button ${selectedPanel === item.key ? "active" : ""} ${!found && !canRunArmSimulation ? "unavailable" : ""}`} onClick={() => openPanel(item.key)} disabled={!found && !canRunArmSimulation}><span>{item.icon}</span><div><strong>{item.title}</strong><small>{sublabel}</small></div>{found && <i />}</button>;
           })}
-          <div className="agent-disclaimer"><span className="agent-orb small">✦</span><p><strong>Design generation</strong><br />{isHumanoid ? "Meta proposes the humanoid concept; local code builds and validates files." : job?.robot_class === "tabletop_robot_arm" ? "Meta proposes the arm spec; local code builds and validates files." : "Rover artifacts are generated by the local demo pipeline."}</p></div>
+          <div className="agent-disclaimer"><span className="agent-orb small">✦</span><p><strong>Meta Multimodal Co-Design</strong><br />{isImageDesign ? "Meta vision decomposes your concept image into parametric FreeCAD solids, KiCad PCB, ROS 2 nodes, and MuJoCo physics." : isHumanoid ? "Meta proposes the humanoid concept; local code builds and validates files." : job?.robot_class === "tabletop_robot_arm" ? "Meta proposes the arm spec; local code builds and validates files." : "Rover artifacts are generated by the local demo pipeline."}</p></div>
         </aside>
 
         <section className="studio-panel editor-panel">
           <div className="editor-toolbar"><div><p className="eyebrow">{selectedPanel === "canvas" || selectedPanel === "assembly" ? "VISUAL WORKSPACE" : "ARTIFACT INSPECTOR"}</p><h3>{({ canvas: "Robot canvas", assembly: "CAD assembly", design: "Robot design", urdf: "URDF model", parts: "Bill of materials", cad: "CAD parts and assembly", code: "Control software", validation: "Validation report", simulation: "Simulation results" })[selectedPanel]}</h3></div><span className="canvas-mode">{selectedPanel === "assembly" ? "LOCAL CAD IMPORT" : selectedPanel === "cad" ? "PARAMETRIC CONCEPT" : selectedPanel === "code" ? "STARTER CODE" : selectedPanel === "canvas" ? (job?.robot_class === "differential-drive-rover" ? "2D PREVIEW" : "3D MODEL") : activeBody?.schema_version || "WAITING"}</span></div>
-          <div style={{ display: selectedPanel === "assembly" ? "block" : "none" }}><ComponentAssemblyEditor freecadExport={cadExportDocument} designSpec={isImageDesign ? designSpec : null} onInspectComponent={isImageDesign ? inspectDesignComponent : undefined} onProposeSketchEdit={isImageDesign ? proposeCadSketchEdit : undefined} onApplySketchEdit={isImageDesign ? editCadSketches : undefined} busy={busy} /></div>
-          {selectedPanel !== "assembly" && (selectedPanel === "canvas" ? <div className="canvas-stage job-canvas">{job?.robot_class === "tabletop_robot_arm" ? <ArmModelViewer urdf={urdfDocument?.body} initialPickTarget={visionPickTarget} /> : isHumanoid || isImageDesign ? <UrdfModelViewer urdf={urdfDocument?.body} geometry={isHumanoid ? designSpec?.geometry : null} autoFrame={isImageDesign} componentCount={isImageDesign ? designSpec?.components?.length : null} /> : <RoverView sim={simulationDoc} />}</div> : selectedPanel === "simulation" && job?.robot_class === "tabletop_robot_arm" ? <div className="artifact-workspace arm-simulation-workspace"><div className="simulation-controls"><p className="eyebrow">REPRODUCIBLE PHYSICS TASK</p><h3>Tabletop pick and place</h3><p>Run the reviewed arm specification in MuJoCo with contact physics, gravity, joint effort limits, and a parallel gripper.</p>{simulationDoc?.status === "stale" && <p className="simulation-stale-note">{simulationDoc.reason}</p>}{[{ label: "Pick target", values: simulationPick, set: setSimulationPick }, { label: "Place target", values: simulationPlace, set: setSimulationPlace }].map((target) => <fieldset className="target-fields" key={target.label}><legend>{target.label} · metres</legend>{["X", "Y", "Z"].map((axis, index) => <label key={axis}>{axis}<input type="number" min="-0.75" max="0.75" step="0.01" value={target.values[index]} disabled={busy} onChange={(event) => target.set((current) => current.map((value, i) => i === index ? event.target.value : value))} /></label>)}</fieldset>)}<label className="simulation-training-toggle"><input type="checkbox" checked={trainArmController} disabled={busy} onChange={(event) => setTrainArmController(event.target.checked)} /> Tune controller gains against this task before the final run</label><button className="primary-action" type="button" disabled={busy || job?.state !== "succeeded"} onClick={runArmPhysics}>{busy ? "Running MuJoCo…" : trainArmController ? "Tune and run simulation →" : "Run physics simulation →"}</button><small>Controller tuning is deterministic servo-gain search, not reinforcement learning. Generated mass and geometry remain estimates.</small></div>{simulationDoc?.engine === "MuJoCo" && <><div className="simulation-metrics"><div><span>Task</span><strong>{simulationDoc.passed ? "Passed" : "Needs review"}</strong></div><div><span>Payload placement error</span><strong>{(simulationDoc.metrics.goal_error_m * 1000).toFixed(1)} mm</strong></div><div><span>Contact steps observed</span><strong>{simulationDoc.metrics.contacts_seen}</strong></div><div><span>Physics engine</span><strong>MuJoCo {simulationDoc.engine_version}</strong></div></div>{!simulationDoc.passed && <div className="simulation-repair"><strong>Simulation found a design issue</strong><p>Ask Meta to use the local task metrics to suggest one bounded parameter change. You will review it before any files are rebuilt.</p><button className="secondary-button" type="button" disabled={busy} onClick={requestArmRepair}>{busy ? "Reviewing simulation…" : "Ask AI to suggest a repair"}</button>{armRepairProposal && <div className="cad-sketch-proposal"><strong>{armRepairProposal.parameter.replace(/_/g, " ")}{armRepairProposal.joint_name !== "none" ? ` · ${armRepairProposal.joint_name}` : ""}: {armRepairProposal.value}</strong><p>{armRepairProposal.rationale}</p><small>{armRepairProposal.review_notes}</small><button className="artifact-download" type="button" disabled={busy} onClick={applyArmRepair}>Accept change, rebuild files, and rerun</button><small>Applying the edit marks the previous physics result stale. A new simulation is required before the change counts as improved.</small></div>}</div>}{simulationDoc.controller?.training?.status === "completed" && <p className="simulation-training-result">Controller tuning completed · {simulationDoc.controller.training.iterations} configurations · selected gains {simulationDoc.controller.gains.map((gain) => gain.toFixed(0)).join(" / ")}</p>}<div className="canvas-stage job-canvas"><ArmModelViewer urdf={urdfDocument?.body} simulationTrajectory={simulationDoc.trajectory} /></div><details className="simulation-record"><summary>Open full simulation record and assumptions</summary><pre>{JSON.stringify(simulationDoc, null, 2)}</pre></details><p className="panel-footnote">The animation replays sampled joint states from the physics run using the visual URDF. The simulated payload path and contact results are in the run record.</p></>}</div> : activeBody ? <div className="artifact-workspace"><ArtifactViewer artifact={activeBody} cadExport={cadExportBody} onRebuildCad={isImageDesign && selectedPanel === "cad" ? rebuildCad : undefined} rebuildingCad={busy} /></div> : <div className="empty-state">This file appears after its workflow stage completes.</div>)}
+          <div style={{ display: selectedPanel === "assembly" ? "block" : "none" }}><ComponentAssemblyEditor freecadExport={cadExportDocument} designSpec={isImageDesign ? designSpec : null} onInspectComponent={isImageDesign ? inspectDesignComponent : undefined} onProposeSketchEdit={isImageDesign ? proposeCadSketchEdit : undefined} onApplySketchEdit={isImageDesign ? editCadSketches : undefined} onProposeDesignRevision={isImageDesign ? proposeDesignRevision : undefined} onApplyDesignRevision={isImageDesign ? applyDesignRevision : undefined} busy={busy} /></div>
+          {selectedPanel !== "assembly" && (selectedPanel === "canvas" ? <div className="canvas-stage job-canvas">{job?.robot_class === "tabletop_robot_arm" ? <ArmModelViewer urdf={urdfDocument?.body} initialPickTarget={visionPickTarget} /> : isHumanoid || isImageDesign ? <UrdfModelViewer urdf={urdfDocument?.body} geometry={isHumanoid ? designSpec?.geometry : null} autoFrame={isImageDesign} componentCount={isImageDesign ? designSpec?.components?.length : null} /> : <RoverView sim={simulationDoc} />}</div> : selectedPanel === "simulation" && job?.robot_class === "tabletop_robot_arm" ? <div className="artifact-workspace arm-simulation-workspace"><div className="simulation-controls"><p className="eyebrow">REPRODUCIBLE PHYSICS TASK</p><h3>Tabletop pick and place</h3><p>Run the reviewed arm specification in MuJoCo with contact physics, gravity, joint effort limits, and a parallel gripper.</p>{simulationDoc?.status === "stale" && <p className="simulation-stale-note">{simulationDoc.reason}</p>}{[{ label: "Pick target", values: simulationPick, set: setSimulationPick }, { label: "Place target", values: simulationPlace, set: setSimulationPlace }].map((target) => <fieldset className="target-fields" key={target.label}><legend>{target.label} · metres</legend>{["X", "Y", "Z"].map((axis, index) => <label key={axis}>{axis}<input type="number" min="-0.75" max="0.75" step="0.01" value={target.values[index]} disabled={busy} onChange={(event) => target.set((current) => current.map((value, i) => i === index ? event.target.value : value))} /></label>)}</fieldset>)}<label className="simulation-training-toggle"><input type="checkbox" checked={trainArmController} disabled={busy} onChange={(event) => setTrainArmController(event.target.checked)} /> Tune controller gains against this task before the final run</label><button className="primary-action" type="button" disabled={busy || job?.state !== "succeeded"} onClick={runArmPhysics}>{busy ? "Running MuJoCo…" : trainArmController ? "Tune and run simulation →" : "Run physics simulation →"}</button><small>Controller tuning is deterministic servo-gain search, not reinforcement learning. Generated mass and geometry remain estimates.</small></div>{simulationDoc?.engine === "MuJoCo" && <><div className="simulation-metrics"><div><span>Task</span><strong>{simulationDoc.passed ? "Passed" : "Needs review"}</strong></div><div><span>Payload placement error</span><strong>{(simulationDoc.metrics.goal_error_m * 1000).toFixed(1)} mm</strong></div><div><span>Contact steps observed</span><strong>{simulationDoc.metrics.contacts_seen}</strong></div><div><span>Physics engine</span><strong>MuJoCo {simulationDoc.engine_version}</strong></div></div>{!simulationDoc.passed && <div className="simulation-repair"><strong>Simulation found a design issue</strong><p>Ask Meta to use the local task metrics to suggest one bounded parameter change. You will review it before any files are rebuilt.</p><button className="secondary-button" type="button" disabled={busy} onClick={requestArmRepair}>{busy ? "Reviewing simulation…" : "Ask AI to suggest a repair"}</button>{armRepairProposal && <div className="cad-sketch-proposal"><strong>{armRepairProposal.parameter.replace(/_/g, " ")}{armRepairProposal.joint_name !== "none" ? ` · ${armRepairProposal.joint_name}` : ""}: {armRepairProposal.value}</strong><p>{armRepairProposal.rationale}</p><small>{armRepairProposal.review_notes}</small><button className="artifact-download" type="button" disabled={busy} onClick={applyArmRepair}>Accept change, rebuild files, and rerun</button><small>Applying the edit marks the previous physics result stale. A new simulation is required before the change counts as improved.</small></div>}</div>}{simulationDoc.controller?.training?.status === "completed" && <p className="simulation-training-result">Controller tuning completed · {simulationDoc.controller.training.iterations} configurations · selected gains {simulationDoc.controller.training.selected_gains ? simulationDoc.controller.training.selected_gains.map((gain) => gain.toFixed(0)).join(" / ") : simulationDoc.controller.gains.map((gain) => gain.toFixed(0)).join(" / ")}</p>}<div className="canvas-stage job-canvas"><ArmModelViewer urdf={urdfDocument?.body} simulationTrajectory={simulationDoc.trajectory} /></div><details className="simulation-record"><summary>Open full simulation record and assumptions</summary><pre>{JSON.stringify(simulationDoc, null, 2)}</pre></details><p className="panel-footnote">The animation replays sampled joint states from the physics run using the visual URDF. The simulated payload path and contact results are in the run record.</p></>}</div> : activeBody ? <div className="artifact-workspace"><ArtifactViewer artifact={activeBody} cadExport={cadExportBody} onRebuildCad={isImageDesign && selectedPanel === "cad" ? rebuildCad : undefined} rebuildingCad={busy} onApplyCoDesignEdits={isImageDesign ? editCadSketches : undefined} /></div> : <div className="empty-state">This file appears after its workflow stage completes.</div>)}
           {selectedPanel === "simulation" && job?.robot_class === "tabletop_robot_arm" && <section className="simulation-benchmark"><div><strong>Compare generated arm designs</strong><p>Run the same default MuJoCo pick-and-place acceptance task on up to eight recent arm designs in this project.</p></div><button className="secondary-button" type="button" disabled={busy || job?.state !== "succeeded"} onClick={benchmarkArmDesigns}>{busy ? "Benchmarking designs…" : "Run project benchmark"}</button>{simulationDoc?.engine === "MuJoCo" && simulationDoc.failure_reasons?.length > 0 && <div className="simulation-failures"><strong>Why this run failed</strong><ul>{simulationDoc.failure_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul></div>}{benchmarkDoc?.results && <div className="simulation-benchmark-results"><div><strong>Benchmark result</strong><span>{benchmarkDoc.passed_count}/{benchmarkDoc.design_count} designs passed</span></div>{benchmarkDoc.results.map((result) => <article key={`${result.job_id}-${result.spec_artifact_id || "invalid"}`}><div><strong>{result.design_name}</strong><span className={result.passed ? "benchmark-pass" : "benchmark-fail"}>{result.passed ? "PASS" : "FAIL"}</span></div>{result.metrics && <small>Placement error {(result.metrics.goal_error_m * 1000).toFixed(1)} mm · grasp {result.metrics.grasp_contact_seen ? "contacted" : "missed"} · lift {result.metrics.payload_lifted ? "held" : "failed"} · release {result.metrics.payload_released ? "yes" : "no"}</small>}{result.failure_reasons?.length > 0 && <ul>{result.failure_reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>}</article>)}</div>}</section>}
-          {selectedPanel === "canvas" && (job?.robot_class === "tabletop_robot_arm" ? <div className="canvas-specs"><div><span>Robot platform</span><strong>4-DOF tabletop arm</strong></div><div><span>Maximum reach</span><strong>{designSpec ? `${(designSpec.geometry.upper_arm_length_m + designSpec.geometry.forearm_length_m + designSpec.geometry.wrist_length_m).toFixed(2)} m` : "Generating spec"}</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_kg} kg` : "Awaiting design"}</strong></div></div> : isHumanoid ? <div className="canvas-specs"><div><span>Robot platform</span><strong>{designSpec ? `${designSpec.height_m.toFixed(2)} m humanoid` : "Research humanoid"}</strong></div><div><span>Actuated joints</span><strong>31 body · 20 per hand</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_per_arm_kg.toFixed(1)} kg per arm` : "Awaiting design"}</strong></div></div> : isImageDesign ? <div className="canvas-specs"><div><span>Robot concept</span><strong>{designSpec?.title || designSpec?.robot_type || "Image-derived concept"}</strong></div><div><span>Estimated envelope</span><strong>{designSpec?.estimated_dimensions_m ? `${designSpec.estimated_dimensions_m.width.toFixed(2)} × ${designSpec.estimated_dimensions_m.depth.toFixed(2)} × ${designSpec.estimated_dimensions_m.height.toFixed(2)} m` : "Awaiting proposal"}</strong></div><div><span>Concept components</span><strong>{designSpec?.components?.length ? `${designSpec.components.length} visual parts · fixed layout` : "Awaiting proposal"}</strong></div></div> : <div className="canvas-specs"><div><span>Robot platform</span><strong>Differential-drive rover</strong></div><div><span>Route distance</span><strong>{simulationDoc?.distance_m != null ? `${Number(simulationDoc.distance_m).toFixed(1)} m` : "Awaiting simulation"}</strong></div><div><span>Evidence</span><strong>{simulationDoc?.passed ? "Route passed" : simulationDoc ? "Review findings" : "Preview only"}</strong></div></div>)}
+          {selectedPanel === "canvas" && (job?.robot_class === "tabletop_robot_arm" ? <div className="canvas-specs"><div><span>Robot platform</span><strong>4-DOF tabletop arm</strong></div><div><span>Maximum reach</span><strong>{designSpec ? `${(designSpec.geometry.upper_arm_length_m + designSpec.geometry.forearm_length_m + designSpec.geometry.wrist_length_m).toFixed(2)} m` : "Generating spec"}</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_kg} kg` : "Awaiting design"}</strong></div></div> : isHumanoid ? <div className="canvas-specs"><div><span>Robot platform</span><strong>{designSpec ? `${designSpec.height_m.toFixed(2)} m humanoid` : "Research humanoid"}</strong></div><div><span>Actuated joints</span><strong>31 body · 20 per hand</strong></div><div><span>Payload proposal</span><strong>{designSpec ? `${designSpec.payload_per_arm_kg.toFixed(1)} kg per arm` : "Awaiting design"}</strong></div></div> : isImageDesign ? <div className="canvas-specs"><div><span>Robot concept</span><strong>{designSpec?.title || designSpec?.robot_type || "Image-derived concept"}</strong></div><div><span>Estimated envelope</span><strong>{designSpec?.estimated_dimensions_m ? `${designSpec.estimated_dimensions_m.width.toFixed(2)} × ${designSpec.estimated_dimensions_m.depth.toFixed(2)} × ${designSpec.estimated_dimensions_m.height.toFixed(2)} m` : "Awaiting proposal"}</strong></div><div><span>Concept components</span><strong>{designSpec?.components?.length ? `${designSpec.components.length} parametric parts · revolute kinematics` : "Awaiting proposal"}</strong></div></div> : <div className="canvas-specs"><div><span>Robot platform</span><strong>Differential-drive rover</strong></div><div><span>Route distance</span><strong>{simulationDoc?.distance_m != null ? `${Number(simulationDoc.distance_m).toFixed(1)} m` : "Awaiting simulation"}</strong></div><div><span>Evidence</span><strong>{simulationDoc?.passed ? "Route passed" : simulationDoc ? "Review findings" : "Preview only"}</strong></div></div>)}
         </section>
 
         <aside className="studio-panel activity-panel">
@@ -744,7 +883,7 @@ function JobScreen({ jobId, onBack, visionPickTarget }) {
             return <li key={step.state} className={`${complete ? "complete" : ""} ${active ? "current" : ""}`}><span className="workflow-marker">{complete ? "✓" : active ? "•" : String(i + 1).padStart(2, "0")}</span><div><strong>{step.label}</strong>{active && <small>{job.state === "awaiting_review" ? "Your review is needed" : "In progress"}</small>}</div></li>;
           })}</ol>
           <div className="activity-log"><h4>Run events</h4>{events.length === 0 ? <p className="muted">Waiting for workflow events…</p> : events.slice(-5).reverse().map((event) => <div className="activity-event" key={event.id}><span className="event-mark" /><div><strong>{event.state.replace(/_/g, " ")}</strong><small>{new Date(event.created_at).toLocaleTimeString()}</small></div></div>)}</div>
-          <p className="panel-footnote">{isImageDesign ? "Image-inspired primitive concept geometry. Parts and dimensions are estimates; joints, internals, strength checks, and physics are not included." : isHumanoid ? "Humanoid assembly is a neutral-pose kinematic preview. Balance, gait physics, full collision checks, and hardware safety approval are not implemented." : job?.robot_class === "tabletop_robot_arm" ? "The canvas preview is kinematic. The Simulation panel runs a separate MuJoCo task using estimated primitive geometry; neither output authorizes hardware motion." : "Simulation results are estimates for review, not hardware safety approval."}</p>
+          <p className="panel-footnote">{isImageDesign ? "Full-stack mechatronics package: FreeCAD 1.0 OpenCASCADE solids (.FCStd/.STEP/.STL), KiCad 8.0 2-layer PCB, 3D harness routing, MuJoCo 3.17.0 physics, and ROS 2 / C++ / Python firmware." : isHumanoid ? "Humanoid assembly is a neutral-pose kinematic preview. Balance, gait physics, full collision checks, and hardware safety approval are not implemented." : job?.robot_class === "tabletop_robot_arm" ? "The canvas preview is kinematic. The Simulation panel runs a separate MuJoCo task using estimated primitive geometry; neither output authorizes hardware motion." : "Simulation results are estimates for review, not hardware safety approval."}</p>
         </aside>
       </div>
     </section>
@@ -776,9 +915,11 @@ export default function App() {
   return (
     <div className="shell">
       <header className="topbar">
-        <div>
-          <h1>ForgeBot</h1>
-          <p className="muted">Robotics design workspace · prototype outputs need engineering review</p>
+        <div style={{ display: "flex", alignItems: "center", gap: "14px", flexWrap: "wrap" }}>
+          <div>
+            <h1>ForgeBot</h1>
+            <p className="muted">Multimodal AI-to-Hardware Mechatronics Studio · FreeCAD 1.0 · MuJoCo 3.17 · KiCad 8.0 · ROS 2</p>
+          </div>
         </div>
         {user && (
           <div className="userbox">

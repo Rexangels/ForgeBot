@@ -173,6 +173,149 @@ export function checkArmTableClearance(arm, angles) {
   return tableClearance(arm, angles);
 }
 
+// Capsule radii in metres, mirroring the MJCF model and backend predictor.
+// Adjacent link pairs share a joint by construction, so only non-adjacent
+// pairs are checked, matching the simulation's contact allowlist.
+const LINK_RADII = { base: 0.035, upper: 0.018, forearm: 0.016, wrist: 0.014 };
+const SELF_PAIRS = [["base", "forearm"], ["base", "wrist"], ["upper", "wrist"]];
+
+function linkSegments(arm, angles) {
+  const [shoulder, elbow, wristBase, tool] = forwardArmLinkPoints(arm, angles);
+  const origin = { x: 0, y: 0, z: 0 };
+  return {
+    base: [origin, shoulder, LINK_RADII.base],
+    upper: [shoulder, elbow, LINK_RADII.upper],
+    forearm: [elbow, wristBase, LINK_RADII.forearm],
+    wrist: [wristBase, tool, LINK_RADII.wrist],
+  };
+}
+
+function sub(a, b) {
+  return [a.x - b.x, a.y - b.y, a.z - b.z];
+}
+
+function dot(a, b) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+export function segmentSegmentDistance(p1, q1, p2, q2) {
+  const d1 = sub(q1, p1);
+  const d2 = sub(q2, p2);
+  const r = sub(p1, p2);
+  const a = dot(d1, d1);
+  const e = dot(d2, d2);
+  const f = dot(d2, r);
+  let s;
+  let t;
+  if (a < 1e-12 && e < 1e-12) return Math.hypot(r[0], r[1], r[2]);
+  if (a < 1e-12) {
+    s = 0;
+    t = Math.max(0, Math.min(1, f / e));
+  } else if (e < 1e-12) {
+    t = 0;
+    s = Math.max(0, Math.min(1, -dot(d1, r) / a));
+  } else {
+    const c = dot(d1, r);
+    const b = dot(d1, d2);
+    const denom = a * e - b * b;
+    s = denom < 1e-12 ? 0 : Math.max(0, Math.min(1, (b * f - c * e) / denom));
+    t = (b * s + f) / e;
+    if (t < 0) {
+      t = 0;
+      s = Math.max(0, Math.min(1, -c / a));
+    } else if (t > 1) {
+      t = 1;
+      s = Math.max(0, Math.min(1, (b - c) / a));
+    }
+  }
+  const ax = p1.x + d1[0] * s;
+  const ay = p1.y + d1[1] * s;
+  const az = p1.z + d1[2] * s;
+  const bx = p2.x + d2[0] * t;
+  const by = p2.y + d2[1] * t;
+  const bz = p2.z + d2[2] * t;
+  return Math.hypot(ax - bx, ay - by, az - bz);
+}
+
+function pointBoxDistance(point, center, half) {
+  const dx = Math.abs(point.x - center.x) - half.x;
+  const dy = Math.abs(point.y - center.y) - half.y;
+  const dz = Math.abs(point.z - center.z) - half.z;
+  const outside = Math.hypot(Math.max(dx, 0), Math.max(dy, 0), Math.max(dz, 0));
+  return outside > 0 ? outside : Math.max(dx, dy, dz);
+}
+
+function segmentBoxClearance(start, end, radius, center, half, samples = 16) {
+  let clearance = Infinity;
+  for (let index = 0; index <= samples; index += 1) {
+    const t = index / samples;
+    const point = {
+      x: start.x + (end.x - start.x) * t,
+      y: start.y + (end.y - start.y) * t,
+      z: start.z + (end.z - start.z) * t,
+    };
+    clearance = Math.min(clearance, pointBoxDistance(point, center, half));
+  }
+  return clearance - radius;
+}
+
+export function checkArmSelfCollision(arm, angles) {
+  const segments = linkSegments(arm, angles);
+  let worst = { clear: true, clearance: Infinity };
+  for (const [first, second] of SELF_PAIRS) {
+    const [p1, q1, r1] = segments[first];
+    const [p2, q2, r2] = segments[second];
+    const clearance = segmentSegmentDistance(p1, q1, p2, q2) - r1 - r2;
+    if (clearance < Math.min(worst.clearance, 0)) {
+      worst = {
+        clear: false,
+        clearance,
+        reason: `${first} and ${second} overlap by ${(-clearance * 1000).toFixed(1)} mm; this pose would self-collide.`,
+      };
+    }
+  }
+  return worst.clear ? { clear: true, clearance: worst.clearance } : worst;
+}
+
+export function checkArmObstacles(arm, angles, obstacles = []) {
+  const segments = linkSegments(arm, angles);
+  for (const obstacle of obstacles) {
+    const ignored = new Set(["base", ...(obstacle.ignore || [])]);
+    for (const [name, [start, end, radius]] of Object.entries(segments)) {
+      if (ignored.has(name)) continue;
+      const clearance = segmentBoxClearance(start, end, radius, obstacle.center, obstacle.half);
+      if (clearance < 0) {
+        return {
+          clear: false,
+          clearance,
+          reason: `${name} intersects ${obstacle.name} by ${(-clearance * 1000).toFixed(1)} mm.`,
+        };
+      }
+    }
+  }
+  return { clear: true };
+}
+
+export function workcellObstacles(pick, place, binHalf = null) {
+  const wall = 0.005;
+  // The tool tip intentionally enters payload space during grasp, mirroring
+  // the simulation's finger/payload contact allowlist; bin walls check all links.
+  const toolFree = { ignore: ["wrist"] };
+  const obstacles = [
+    { name: "pick payload", center: { x: pick.x, y: pick.y, z: 0.018 }, half: { x: 0.015, y: 0.015, z: 0.015 }, ...toolFree },
+    { name: "place payload", center: { x: place.x, y: place.y, z: 0.018 }, half: { x: 0.015, y: 0.015, z: 0.015 }, ...toolFree },
+  ];
+  // Bin walls are opt-in: the workcell has no bin model by default, and an
+  // invented bin would false-block placements that physics accepts.
+  if (!binHalf) return obstacles;
+  return [...obstacles,
+    { name: "bin wall x+", center: { x: place.x + binHalf.x, y: place.y, z: binHalf.z / 2 }, half: { x: wall, y: binHalf.y, z: binHalf.z / 2 } },
+    { name: "bin wall x-", center: { x: place.x - binHalf.x, y: place.y, z: binHalf.z / 2 }, half: { x: wall, y: binHalf.y, z: binHalf.z / 2 } },
+    { name: "bin wall y+", center: { x: place.x, y: place.y + binHalf.y, z: binHalf.z / 2 }, half: { x: binHalf.x, y: wall, z: binHalf.z / 2 } },
+    { name: "bin wall y-", center: { x: place.x, y: place.y - binHalf.y, z: binHalf.z / 2 }, half: { x: binHalf.x, y: wall, z: binHalf.z / 2 } },
+  ];
+}
+
 export function solveArmTarget(arm, target) {
   const radial = Math.hypot(target.x, target.y);
   const yaw = Math.atan2(target.y, target.x);

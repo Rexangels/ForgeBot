@@ -1,5 +1,6 @@
 import React from "react";
 import RoverView from "./RoverView.jsx";
+import MechatronicsPanel from "./MechatronicsPanel.jsx";
 
 export function StateChip({ state }) {
   return <span className={`chip chip-${state}`}>{state.replace(/_/g, " ")}</span>;
@@ -76,7 +77,7 @@ function downloadBase64(file) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCad = false }) {
+export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCad = false, onApplyCoDesignEdits }) {
   if (!artifact) {
     return <p className="muted">Select an artifact to inspect it.</p>;
   }
@@ -135,14 +136,30 @@ export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCa
     if (doc.status === "not_run") {
       return <div><h3>Simulation not run</h3><p>{doc.reason || "A physics simulation is not available for this concept."}</p></div>;
     }
+    const mp = doc.mass_properties;
+    const stab = doc.stability;
+    const dt = doc.drivetrain;
+    const ot = doc.obstacle_training;
+    const codesign = ot?.codesign_refinements;
     return (
       <div>
-        <h3>Simulation result (simulated)</h3>
+        <h3>Simulation &amp; Obstacle World Co-Design Training</h3>
         <p>
           {doc.passed ? "Route passed." : "Route failed."} Distance{" "}
           {Number(doc.distance_m).toFixed(2)} m
           {doc.collisions ? `, ${doc.collisions} collision(s)` : ", no collisions"}.
+          {ot ? ` · Trained across ${ot.episodes_run} episodes in a ${ot.obstacles?.length || 0}-obstacle world (converged at Episode ${ot.converged_episode}).` : ""}
         </p>
+        {mp && stab && dt && (
+          <p className="muted">
+            Mass: <strong>{Number(mp.total_mass_kg).toFixed(3)} kg</strong> · <span className="term-help" title="Center of mass: the balance point where the robot's mass can be treated as concentrated." tabIndex={0}>CoM</span>{" "}
+            <code>[{mp.center_of_mass_m.map((v) => Number(v).toFixed(3)).join(", ")}] m</code> · Stability margin:{" "}
+            <strong title="Distance from the projected center of mass to the edge of the support area.">{(Number(stab.stability_margin_m) * 1000).toFixed(1)} mm</strong> (tip-over{" "}
+            <strong>{Number(stab.tip_over_angle_deg).toFixed(1)}°</strong>) · Drive:{" "}
+            <strong>{dt.wheel_count} wheels</strong> ({Number(dt.cruise_speed_m_s).toFixed(2)} m/s,{" "}
+            {Number(dt.estimated_motor_effort_nm).toFixed(3)} N·m)
+          </p>
+        )}
         {doc.violations?.length > 0 && (
           <ul className="findings">
             {doc.violations.map((v, i) => (
@@ -153,12 +170,346 @@ export function ArtifactViewer({ artifact, cadExport, onRebuildCad, rebuildingCa
           </ul>
         )}
         <RoverView sim={doc} />
-        <h4>Assumptions</h4>
+
+        {ot && (
+          <section className="cad-validation-panel" style={{ marginTop: 18 }}>
+            <h4>
+              Multi-Episode Obstacle World Training Progression{" "}
+              <span className="assembly-status assembly-status-passed">
+                Converged Ep {ot.converged_episode}/{ot.episodes_run}
+              </span>
+            </h4>
+            <p className="muted">
+              Episode 1 starts with an untuned reactive controller that clips obstacles. The policy optimizer iteratively tunes repulsive potential gain, lookahead horizon, and yaw-rate speed damping across {ot.episodes_run} episodes while recording structural stress &amp; clearance telemetry.
+            </p>
+            <div style={{ overflowX: "auto", marginTop: 10 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, textAlign: "left" }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid rgba(148,163,184,0.25)", color: "#94a3b8" }}>
+                    <th style={{ padding: "6px 8px" }}>Episode</th>
+                    <th style={{ padding: "6px 8px" }}>Collisions</th>
+                    <th style={{ padding: "6px 8px" }}>Min Clearance</th>
+                    <th style={{ padding: "6px 8px" }}>Peak Dynamic Roll</th>
+                    <th style={{ padding: "6px 8px" }}>Path Length</th>
+                    <th style={{ padding: "6px 8px" }}>Reward</th>
+                    <th style={{ padding: "6px 8px" }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(ot.episode_history || []).map((ep) => (
+                    <tr
+                      key={ep.episode}
+                      style={{
+                        borderBottom: "1px solid rgba(148,163,184,0.12)",
+                        background: ep.episode === ot.converged_episode ? "rgba(16,185,129,0.10)" : "transparent",
+                      }}
+                    >
+                      <td style={{ padding: "6px 8px", fontWeight: 700 }}>
+                        Ep {ep.episode} {ep.episode === 1 ? "(Untuned)" : ep.episode === ot.converged_episode ? "★ (Selected)" : ""}
+                      </td>
+                      <td style={{ padding: "6px 8px", color: ep.collisions > 0 ? "#f87171" : "#34d399", fontWeight: 600 }}>
+                        {ep.collisions} {ep.collided_obstacles?.length ? `(${ep.collided_obstacles.join(", ")})` : ""}
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>{(Number(ep.min_clearance_m) * 1000).toFixed(1)} mm</td>
+                      <td style={{ padding: "6px 8px", color: ep.peak_roll_ratio > 0.7 ? "#fbbf24" : "#cbd5e1" }}>
+                        {(Number(ep.peak_roll_ratio) * 100).toFixed(1)}% of tip-over
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>{Number(ep.distance_m).toFixed(2)} m</td>
+                      <td style={{ padding: "6px 8px", fontFamily: "monospace" }}>{Number(ep.reward).toFixed(1)}</td>
+                      <td style={{ padding: "6px 8px" }}>
+                        <span className={`assembly-status assembly-status-${ep.passed ? "passed" : "failed"}`}>
+                          {ep.passed ? "PASSED" : "COLLIDED"}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {doc.codesign_comparison && (
+          <section
+            className="cad-validation-panel"
+            style={{
+              marginTop: 14,
+              border: "1.5px solid rgba(16, 185, 129, 0.55)",
+              background: "linear-gradient(135deg, rgba(6, 78, 59, 0.45), rgba(15, 23, 42, 0.85))",
+            }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <h4 style={{ margin: 0, color: "#a7f3d0" }}>
+                ✓ Closed-Loop Co-Design Verification Scorecard (Before vs. After CAD + MuJoCo Rebuild)
+              </h4>
+              <span className="assembly-status assembly-status-passed">
+                {doc.codesign_comparison.edited_components?.length || 0} CAD Parts Updated &amp; Re-Verified
+              </span>
+            </div>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))",
+                gap: 10,
+                marginTop: 12,
+              }}
+            >
+              {[
+                {
+                  label: "Static Tip-Over Angle",
+                  b: doc.codesign_comparison.tip_over_deg?.before,
+                  a: doc.codesign_comparison.tip_over_deg?.after,
+                  unit: "°",
+                  higherBetter: true,
+                },
+                {
+                  label: "Support Polygon Margin",
+                  b: doc.codesign_comparison.stability_margin_mm?.before,
+                  a: doc.codesign_comparison.stability_margin_mm?.after,
+                  unit: " mm",
+                  higherBetter: true,
+                },
+                {
+                  label: "3D Center of Mass Height",
+                  b: doc.codesign_comparison.com_height_mm?.before,
+                  a: doc.codesign_comparison.com_height_mm?.after,
+                  unit: " mm",
+                  higherBetter: false,
+                },
+                {
+                  label: "Peak Dynamic Roll",
+                  b: doc.codesign_comparison.peak_roll_deg?.before,
+                  a: doc.codesign_comparison.peak_roll_deg?.after,
+                  unit: "°",
+                  higherBetter: false,
+                },
+              ].map((m) => {
+                const delta = Number(m.a || 0) - Number(m.b || 0);
+                const improved = m.higherBetter ? delta >= 0 : delta <= 0;
+                return (
+                  <div
+                    key={m.label}
+                    style={{
+                      padding: "8px 10px",
+                      borderRadius: 6,
+                      background: "rgba(15, 23, 42, 0.7)",
+                      border: "1px solid rgba(148, 163, 184, 0.2)",
+                    }}
+                  >
+                    <div style={{ fontSize: 11, color: "#94a3b8" }}>{m.label}</div>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: "#f8fafc", marginTop: 3, fontFamily: "monospace" }}>
+                      {m.b}
+                      {m.unit} → <span style={{ color: "#34d399" }}>{m.a}{m.unit}</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: improved ? "#34d399" : "#fbbf24", marginTop: 2 }}>
+                      {delta > 0 ? `+${delta.toFixed(1)}` : delta.toFixed(1)}
+                      {m.unit} {improved ? "(Improved)" : ""}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        )}
+
+        {codesign && (
+          <>
+            {onApplyCoDesignEdits && (codesign.structural_refinements || []).length > 0 && (
+              <div
+                style={{
+                  marginTop: 16,
+                  padding: "12px 16px",
+                  borderRadius: 8,
+                  background: "#f0f7f4",
+                  border: "1px solid #cfe3da",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: 12,
+                }}
+              >
+                <div>
+                  <strong style={{ color: "#24483f", fontSize: 14 }}>
+                    ⚡ Closed-Loop Hardware + Software Co-Design Optimizer
+                  </strong>
+                  <p style={{ margin: "3px 0 0", fontSize: 12.5, color: "#53645e" }}>
+                    Automatically apply the primary structural CAD refinement, rebuild FreeCAD <code>.FCStd</code>/<code>.STEP</code>/<code>.STL</code> solids, and re-run MuJoCo 3.17.0 obstacle training to verify stability gains.
+                  </p>
+                </div>
+                <button
+                  className="primary-action"
+                  type="button"
+                  disabled={rebuildingCad}
+                  style={{ cursor: "pointer", whiteSpace: "nowrap" }}
+                  onClick={() => onApplyCoDesignEdits(codesign.structural_refinements[0].component_edits)}
+                >
+                  {rebuildingCad
+                    ? "Rebuilding FreeCAD & MuJoCo…"
+                    : `⚡ Auto-Refine Structure & Software (${codesign.structural_refinements[0].component_edits.length} parts) →`}
+                </button>
+              </div>
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 16, marginTop: 16 }}>
+              <section className="cad-validation-panel" style={{ margin: 0 }}>
+                <h4>
+                  1. Structural &amp; Mechanical CAD Refinements{" "}
+                  <span className="assembly-status assembly-status-warning">Hardware Co-Design</span>
+                </h4>
+                <p className="muted">
+                  Empirical findings from obstacle avoidance maneuvers translated into concrete parametric CAD changes. Apply any refinement below to automatically rebuild the FreeCAD <code>.FCStd</code>/<code>.STEP</code> solids and re-run the obstacle world simulation.
+                </p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 10 }}>
+                {(codesign.structural_refinements || []).map((item) => (
+                  <div
+                    key={item.id}
+                    style={{
+                      padding: 12,
+                      borderRadius: 8,
+                      background: "rgba(15, 23, 42, 0.55)",
+                      border: "1px solid rgba(148, 163, 184, 0.22)",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <strong style={{ color: "#f8fafc", fontSize: 13.5 }}>{item.title}</strong>
+                      <span
+                        style={{
+                          fontSize: 11,
+                          padding: "2px 8px",
+                          borderRadius: 999,
+                          background: item.severity === "high" ? "#fff3dc" : "#e6f4ef",
+                          color: item.severity === "high" ? "#8a5a13" : "#176b5d",
+                          fontWeight: 600,
+                        }}
+                      >
+                        {item.expected_gain}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: 12.5, margin: "6px 0", color: "#cbd5e1" }}>
+                      <strong>Telemetry finding:</strong> {item.finding}
+                    </p>
+                    <p style={{ fontSize: 12.5, margin: "6px 0", color: "#94a3b8" }}>
+                      <strong>CAD change:</strong> {item.recommendation}
+                    </p>
+                    {onApplyCoDesignEdits && item.component_edits?.length > 0 && (
+                      <button
+                        className="artifact-download"
+                        type="button"
+                        disabled={rebuildingCad}
+                        style={{ marginTop: 6, cursor: "pointer" }}
+                        onClick={() => onApplyCoDesignEdits(item.component_edits)}
+                      >
+                        {rebuildingCad
+                          ? "Rebuilding CAD & Re-Simulating…"
+                          : `Apply Structural Refinement (${item.component_edits.length} parts) & Re-Simulate →`}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="cad-validation-panel" style={{ margin: 0 }}>
+              <h4>
+                2. Control Software &amp; Policy Refinements{" "}
+                <span className="assembly-status assembly-status-passed">Learned Gains</span>
+              </h4>
+              <p className="muted">
+                Control policy parameters discovered during multi-episode obstacle world training (Episode 1 untuned baseline vs. Episode {ot.converged_episode} converged policy).
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 10 }}>
+                {(codesign.software_refinements || []).map((sw) => (
+                  <div
+                    key={sw.id}
+                    style={{
+                      padding: 10,
+                      borderRadius: 8,
+                      background: "rgba(15, 23, 42, 0.55)",
+                      border: "1px solid rgba(148, 163, 184, 0.22)",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <code style={{ color: "#38bdf8", fontWeight: 700, fontSize: 12.5 }}>{sw.parameter}</code>
+                      <span style={{ fontSize: 12, fontFamily: "monospace", color: "#34d399", fontWeight: 700 }}>
+                        {sw.before} → {sw.after}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: 12, margin: "5px 0 0", color: "#cbd5e1" }}>{sw.rationale}</p>
+                  </div>
+                ))}
+              </div>
+              {codesign.learned_controller_code && (
+                <div style={{ marginTop: 12 }}>
+                  <p>
+                    <button
+                      className="artifact-download"
+                      type="button"
+                      onClick={() =>
+                        downloadText(
+                          "obstacle_avoidance_controller.py",
+                          codesign.learned_controller_code,
+                          "text/x-python;charset=utf-8"
+                        )
+                      }
+                    >
+                      Download trained controller (obstacle_avoidance_controller.py)
+                    </button>
+                  </p>
+                  <details className="cad-details">
+                    <summary>Inspect learned Python control law</summary>
+                    <pre className="artifact-body" style={{ maxHeight: 240, overflowY: "auto", fontSize: 11.5 }}>
+                      {codesign.learned_controller_code}
+                    </pre>
+                  </details>
+                </div>
+              )}
+            </section>
+          </div>
+          </>
+        )}
+
+        {doc.mechatronics && (
+          <MechatronicsPanel
+            mechatronics={doc.mechatronics}
+            drivetrain={dt}
+            onApplyCoDesignEdits={onApplyCoDesignEdits}
+            rebuildingCad={rebuildingCad}
+            onDownloadText={downloadText}
+            onDownloadZip={(zipName, filesObj) => downloadText(zipName, zipStore(filesObj), "application/zip")}
+          />
+        )}
+
+        <h4 style={{ marginTop: 18 }}>Assumptions</h4>
         <ul>
           {(doc.assumptions || []).map((a, i) => (
             <li key={i}>{a}</li>
           ))}
         </ul>
+      </div>
+    );
+  }
+  if (artifact.kind === "code" && doc?.schema_version === "forgebot-mechatronics-firmware/v1") {
+    return (
+      <div>
+        <h3>Mechatronics, Custom Carrier PCB (.kicad_pcb), Wiring &amp; Vision Firmware</h3>
+        <p className="muted">
+          Complete hardware-to-software deployment package combining physics-coupled 3-hour battery sizing, inspectable custom carrier PCB (aligned with your FreeCAD standoffs), pin-to-pin wiring harness, and onboard camera + ultrasonic obstacle avoidance firmware.
+        </p>
+        <MechatronicsPanel
+          mechatronics={{
+            power_sizing: doc.power_report,
+            pcb_wiring: doc.pcb_wiring,
+            firmware_files: doc.files,
+          }}
+          drivetrain={{
+            wheel_count: 2,
+            wheel_diameter_m: 0.07,
+          }}
+          onApplyCoDesignEdits={onApplyCoDesignEdits}
+          rebuildingCad={rebuildingCad}
+          onDownloadText={downloadText}
+          onDownloadZip={(zipName, filesObj) => downloadText(zipName, zipStore(filesObj), "application/zip")}
+        />
       </div>
     );
   }

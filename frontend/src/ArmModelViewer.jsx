@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { checkArmTableClearance, forwardArmKinematics, parseRobotUrdf, solveArmTarget } from "./armKinematics.js";
+import { checkArmObstacles, checkArmSelfCollision, checkArmTableClearance, forwardArmKinematics, parseRobotUrdf, solveArmTarget, workcellObstacles } from "./armKinematics.js";
 
 const JOINTS = ["base_yaw", "shoulder_pitch", "elbow_pitch", "wrist_pitch"];
 const DEFAULT_PICK = { x: 0.3, y: 0, z: 0.04 };
@@ -366,6 +366,7 @@ export default function ArmModelViewer({ urdf, initialPickTarget = null, simulat
     let prior = angleRef.current;
     let time = 0;
     const path = [];
+    const obstacles = workcellObstacles(pick, place);
     for (const step of specifications) {
       const solution = solveArmTarget(arm, step.point);
       if (!solution.reachable) {
@@ -384,13 +385,23 @@ export default function ArmModelViewer({ urdf, initialPickTarget = null, simulat
           setError(`${step.label}: ${clearance.reason} The animation was not started.`);
           return;
         }
+        const selfCollision = checkArmSelfCollision(arm, pose);
+        if (!selfCollision.clear) {
+          setError(`${step.label}: ${selfCollision.reason} The animation was not started.`);
+          return;
+        }
+        const obstacleHit = checkArmObstacles(arm, pose, obstacles);
+        if (!obstacleHit.clear) {
+          setError(`${step.label}: ${obstacleHit.reason} The animation was not started.`);
+          return;
+        }
         path.push(forwardArmKinematics(arm, pose));
       }
       prior = solution.angles;
     }
     sceneNodes.current?.objects && (sceneNodes.current.objects.deliveredObject.visible = false);
     playbackRef.current = { startedAt: performance.now(), startAngles: angleRef.current, frames, path };
-    setPlaybackNote("Playing a velocity-limited kinematic preview · grasp and collisions are illustrative");
+    setPlaybackNote("Playing a velocity-limited kinematic preview · table, self, and payload collisions checked; grasp is illustrative");
     setPlaying(true);
   };
 

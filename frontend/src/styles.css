@@ -282,13 +282,31 @@ input::placeholder, textarea::placeholder { color: #9ba5ae; }
 .editor-toolbar { min-height: 61px; }
 .editor-toolbar .canvas-mode { font-size: 9px; }
 .job-canvas { min-height: 370px; }
-.artifact-workspace { min-height: 370px; max-height: 60vh; overflow: auto; padding: 17px; }
+.artifact-workspace { min-width: 0; min-height: 370px; padding: 17px; }
+.editor-panel { min-width: 0; }
+.artifact-workspace .viz { max-width: 100%; }
+.artifact-workspace .viz div[aria-label="3D Rover obstacle world simulation viewport"] { height: clamp(280px, 54vh, 560px) !important; }
+.artifact-workspace .viz > div[style*="position: relative"] { min-width: 0; }
+.term-help { text-decoration: underline dotted; text-underline-offset: 3px; cursor: help; }
+.sim-control-button { padding: 5px 9px !important; color: #40534f !important; background: #fff !important; border: 1px solid #dce6e2 !important; border-radius: 6px !important; font-size: 11px !important; font-weight: 600; }
+.sim-control-button[aria-pressed="true"] { color: #116b60 !important; background: #eaf5f1 !important; border-color: #9dcfc3 !important; }
+.sim-control-button:focus-visible { outline: 3px solid #32a89a; outline-offset: 2px; }
 .artifact-workspace h3 { margin: 0 0 12px; }
 .artifact-workspace h4 { margin-top: 15px; }
 .artifact-download { display: inline-block; padding: 7px 9px; color: #fff; background: var(--accent); border-radius: 5px; font-size: 10px; text-decoration: none; }
 button.artifact-download { border: 0; cursor: pointer; font: inherit; font-size: 10px; }
 .text-button { border: 0; padding: 0; background: transparent; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
 .cad-validation-panel { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 7px; background: #f7faf9; }
+.power-metric-card { min-width: 0; padding: 10px; color: var(--ink); background: #f7faf9; border: 1px solid #e0e8e4; border-radius: 8px; }
+.power-metric-label { color: #64736d; font-size: 10px; font-weight: 650; letter-spacing: .035em; }
+.power-metric-value { margin-top: 2px; color: var(--accent-dark); font-size: 15px; font-weight: 700; }
+.power-metric-note { color: #5f6d67; font-size: 11px; }
+.cad-validation-panel [style*="rgba(15, 23, 42"] { background: #f4f8f6 !important; border-color: #dce7e2 !important; }
+.cad-validation-panel [style*="rgba(15, 23, 42"] strong,
+.cad-validation-panel [style*="rgba(15, 23, 42"] p,
+.cad-validation-panel [style*="rgba(15, 23, 42"] div { color: #34443e !important; }
+.cad-validation-panel [style*="linear-gradient(135deg, rgba(6, 78, 59"] { background: #f0f7f4 !important; border-color: #b9d9cd !important; }
+.cad-validation-panel [style*="linear-gradient(135deg, rgba(6, 78, 59"] h4 { color: #245d50 !important; }
 .cad-validation-panel h4 { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 7px; }
 .cad-validation-panel label { display: block; margin: 8px 0; color: #52616a; font-size: 10px; }
 .cad-validation-panel select, .cad-validation-panel input { display: block; width: 100%; box-sizing: border-box; margin-top: 4px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: #24333d; font: inherit; }
@@ -310,6 +328,8 @@ button.artifact-download { border: 0; cursor: pointer; font: inherit; font-size:
 .artifact-workspace .viz figcaption { margin-top: 6px; color: #78848d; font-size: 10px; }
 .arm-simulation-workspace { display: grid; gap: 18px; padding: 20px; }
 .simulation-controls { display: grid; gap: 10px; }
+.arm-simulation-workspace { min-width: 0; max-height: none; overflow: visible; }
+.arm-simulation-workspace .job-canvas { min-height: 0; }
 .simulation-controls h3, .simulation-controls p { margin: 0; }
 .simulation-controls > small, .simulation-controls > p:not(.eyebrow) { color: #687986; line-height: 1.5; }
 .simulation-training-toggle { display: flex; align-items: flex-start; gap: 9px; color: #142a3a; }
@@ -413,6 +433,9 @@ button.artifact-download { border: 0; cursor: pointer; font: inherit; font-size:
   .row { flex-wrap: wrap; }
   .run-title { flex-basis: 100%; }
   .secondary-action { margin-left: auto; }
+  .artifact-workspace { padding: 12px; }
+  .artifact-workspace .viz div[aria-label="3D Rover obstacle world simulation viewport"] { height: clamp(240px, 58vh, 440px) !important; }
+  .arm-simulation-workspace { padding: 12px; }
 }
 @media (prefers-reduced-motion: no-preference) {
   .status-light { animation: pulse 2s infinite; }

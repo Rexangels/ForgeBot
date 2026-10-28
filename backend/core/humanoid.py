@@ -239,7 +239,7 @@ def _link_xml(name: str, mass: float, box: tuple[float, float, float] | None = N
     inertia_y = max(0.000001, mass * (x * x + z * z) / 12)
     inertia_z = max(0.000001, mass * (x * x + y * y) / 12)
     return (
-        f'<link name="{name}"><inertial><mass value="{mass:.6f}"/>'
+        f'<link name="{name}"><inertial><origin xyz="{_fmt(visual_xyz)}"/><mass value="{mass:.6f}"/>'
         f'<inertia ixx="{inertia:.8f}" ixy="0" ixz="0" iyy="{inertia_y:.8f}" iyz="0" izz="{inertia_z:.8f}"/>'
         f'</inertial>{visual}</link>'
     )
@@ -269,12 +269,12 @@ def _joint_xml(name: str, parent: str, child: str, xyz: tuple[float, float, floa
 def generate_humanoid_urdf(spec: dict) -> str:
     """Build a primitive-geometry 31-DOF body and 20-DOF-per-hand topology."""
     g = spec["geometry"]
-    mass_each = spec["mass_kg"] / 77
     links: list[str] = []
     joints: list[str] = []
+    pending_links: list[tuple[str, tuple[float, float, float] | None, tuple[float, float, float]]] = []
 
     def add_link(name, box=None, visual_xyz=(0, 0, 0)):
-        links.append(_link_xml(name, mass_each, box, visual_xyz))
+        pending_links.append((name, box, visual_xyz))
 
     def add_joint(name, parent, child, xyz, axis=(0, 0, 1), kind="revolute"):
         joints.append(_joint_xml(name, parent, child, xyz, axis, kind))
@@ -381,6 +381,18 @@ def generate_humanoid_urdf(spec: dict) -> str:
     for name, parent, xyz in sensor_frames:
         add_link(name, (0.025, 0.025, 0.025))
         add_joint(name.replace("_frame", "_mount"), parent, name, xyz, kind="fixed")
+
+    # Mass follows volume: box links share the reviewed total by their box
+    # volume, joint-only links and sensor frames by a 4 cm reference cube.
+    # The total still sums to the reviewed mass; each link's share is now
+    # proportional to its size instead of uniform across 77 links.
+    def _volume(box):
+        dims = box or (0.04, 0.04, 0.04)
+        return dims[0] * dims[1] * dims[2]
+
+    total_volume = sum(_volume(box) for _, box, _ in pending_links)
+    for name, box, visual_xyz in pending_links:
+        links.append(_link_xml(name, spec["mass_kg"] * _volume(box) / total_volume, box, visual_xyz))
 
     return (
         '<?xml version="1.0"?>\n<robot name="forgebot_research_humanoid">\n'

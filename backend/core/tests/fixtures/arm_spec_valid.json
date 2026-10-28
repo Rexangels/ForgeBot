@@ -1,0 +1,37 @@
+{
+  "schema_version": "robot-arm-spec/v1",
+  "robot_class": "tabletop_robot_arm",
+  "name": "Acceptance arm",
+  "summary": "A small tabletop pick-and-place arm.",
+  "geometry": {
+    "base_diameter_m": 0.12,
+    "base_height_m": 0.06,
+    "upper_arm_length_m": 0.18,
+    "forearm_length_m": 0.18,
+    "wrist_length_m": 0.08
+  },
+  "masses": {
+    "base_kg": 1.0,
+    "shoulder_kg": 0.2,
+    "upper_arm_kg": 0.25,
+    "forearm_kg": 0.2,
+    "wrist_kg": 0.1,
+    "tool_kg": 0.1
+  },
+  "payload_kg": 0.05,
+  "joint_limits": [
+    {"name": "base_yaw", "lower_deg": -180, "upper_deg": 180, "effort_nm": 10, "velocity_rad_s": 1},
+    {"name": "shoulder_pitch", "lower_deg": -135, "upper_deg": 135, "effort_nm": 10, "velocity_rad_s": 1},
+    {"name": "elbow_pitch", "lower_deg": -150, "upper_deg": 150, "effort_nm": 10, "velocity_rad_s": 1},
+    {"name": "wrist_pitch", "lower_deg": -135, "upper_deg": 135, "effort_nm": 10, "velocity_rad_s": 1}
+  ],
+  "gripper": {"type": "parallel_jaw", "jaw_opening_m": 0.05, "grip_force_n": 5},
+  "bom": [
+    {"component": "part-0", "purpose": "test fixture", "availability": "unverified"},
+    {"component": "part-1", "purpose": "test fixture", "availability": "unverified"},
+    {"component": "part-2", "purpose": "test fixture", "availability": "unverified"},
+    {"component": "part-3", "purpose": "test fixture", "availability": "unverified"}
+  ],
+  "assumptions": [],
+  "open_questions": []
+}

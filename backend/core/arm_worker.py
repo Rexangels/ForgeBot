@@ -1,50 +1,27 @@
-"""Local development worker for Meta-backed arm proposals.
-
-This thread makes the prototype UI responsive. It is intentionally a local
-bridge; replace it with the durable Redis worker before production deployment.
-"""
+"""Arm proposal tasks on the durable queue (no in-process threads)."""
 
 from __future__ import annotations
 
-import json
-from threading import Thread
-
 from django.db import close_old_connections
 
-from . import states
-from .artifacts import store_artifact
 from .demo import run_to_review
 from .models import Job
+from .queue import enqueue
 
 
-def _run_proposal(job_id: int, mission: dict, robot_class: str) -> None:
+def run_design_proposal_task(job: Job) -> None:
+    """Queue handler: run the mission to review using the saved task payload."""
     close_old_connections()
     try:
-        job = Job.objects.get(pk=job_id)
-        run_to_review(job, mission, robot_class)
-    except Job.DoesNotExist:
-        return
-    except Exception:
-        # Keep API/provider internals out of user-visible job reports.
-        try:
-            job.refresh_from_db()
-            if job.state not in states.TERMINAL:
-                store_artifact(
-                    job,
-                    "report",
-                    json.dumps({"errors": ["Robot design generation stopped unexpectedly."]}, indent=2),
-                    "report/v1",
-                )
-                job.transition(states.FAILED)
-        except Exception:
-            pass
+        payload = job.task_payload or {}
+        run_to_review(job, payload.get("mission", {}), payload.get("robot_class", "tabletop_robot_arm"))
     finally:
         close_old_connections()
 
 
 def start_design_proposal(job_id: int, mission: dict, robot_class: str) -> None:
-    thread = Thread(target=_run_proposal, args=(job_id, mission, robot_class), daemon=True)
-    thread.start()
+    job = Job.objects.get(pk=job_id)
+    enqueue(job, "design_proposal", {"mission": mission, "robot_class": robot_class})
 
 
 def start_arm_proposal(job_id: int, mission: dict) -> None:

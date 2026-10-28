@@ -26,6 +26,11 @@ class Job(models.Model):
     )
     state = models.CharField(max_length=32, default=states.QUEUED)
     idempotency_key = models.CharField(max_length=128)
+    task_kind = models.CharField(max_length=64, default="")
+    task_payload = models.JSONField(default=dict)
+    attempts = models.IntegerField(default=0)
+    claimed_by = models.CharField(max_length=128, default="")
+    cancel_requested = models.BooleanField(default=False)
     input_revision = models.CharField(max_length=64, default="rev-1")
     provider = models.CharField(max_length=128, default="unconfigured")
     model = models.CharField(max_length=128, default="unconfigured")
@@ -50,11 +55,24 @@ class Job(models.Model):
 class JobEvent(models.Model):
     job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="events")
     state = models.CharField(max_length=32)
+    actor = models.CharField(max_length=150, default="")
     detail = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["id"]
+
+
+class WorkcellCalibration(models.Model):
+    """A saved planar camera calibration: clicked corners, world frame, accuracy."""
+
+    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name="calibrations")
+    label = models.CharField(max_length=120, default="workcell")
+    image_points = models.JSONField(default=list)
+    world_points = models.JSONField(default=list)
+    homography = models.JSONField(default=list)
+    accuracy_m = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
 
 
 class Artifact(models.Model):

@@ -6,6 +6,10 @@ from core import views
 
 urlpatterns = [
     path("api/v1/vision/analyze", views.analyze_scene, name="analyze-scene"),
+    path("api/v1/ops/summary", views.ops_summary, name="ops-summary"),
+    path("api/v1/vision/track", views.track_detections, name="track-detections"),
+    path("api/v1/projects/<int:project_id>/calibrations", views.save_calibration, name="save-calibration"),
+    path("api/v1/projects/<int:project_id>/calibrations/latest", views.latest_calibration, name="latest-calibration"),
     path("api/v1/projects/<int:project_id>/image-design", views.create_image_design, name="image-design"),
     path("api/v1/auth/csrf", views.csrf_token, name="csrf"),
     path("api/v1/auth/login", views.login_view, name="login"),
@@ -47,6 +51,21 @@ urlpatterns = [
         "api/v1/jobs/<int:job_id>/propose-cad-sketch-edit",
         views.propose_cad_sketch_edit,
         name="propose-cad-sketch-edit",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/propose-design-revision",
+        views.propose_design_revision,
+        name="propose-design-revision",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/apply-design-revision",
+        views.apply_design_revision,
+        name="apply-design-revision",
+    ),
+    path(
+        "api/v1/jobs/<int:job_id>/simulate-humanoid",
+        views.simulate_humanoid,
+        name="simulate-humanoid",
     ),
     path(
         "api/v1/jobs/<int:job_id>/inspect-component",

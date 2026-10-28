@@ -112,7 +112,12 @@ def run_from_approval(job: Job) -> dict:
     bom_doc = json.loads(job.artifacts.get(kind="bom").body)
     spec_doc = json.loads(job.artifacts.get(kind="spec").body)
     if spec_doc.get("robot_class") == "image_robot_design":
-        from .image_design import generate_cad_package, generate_image_robot_urdf
+        from .image_design import (
+            generate_cad_package,
+            generate_image_robot_firmware_artifact,
+            generate_image_robot_urdf,
+            simulate_image_robot,
+        )
 
         urdf = generate_image_robot_urdf(spec_doc)
         store_artifact(job, "urdf", urdf, "urdf/v1")
@@ -130,8 +135,10 @@ def run_from_approval(job: Job) -> dict:
         } for item in assembly_validation["findings"] if item["severity"] in ("blocker", "warning"))
         blockers = [item for item in findings if item["severity"] == SEVERITY_BLOCKER]
         store_artifact(job, "report", json.dumps({"findings": findings, "assembly_validation": assembly_validation, "label": "conceptual geometry only"}, indent=2), "report/v1")
-        simulation = {"status": "not_run", "reason": "Image-derived concept has no actuator, mass-property, collision, or controller model yet."}
+        simulation = simulate_image_robot(spec_doc)
         store_artifact(job, "sim", json.dumps(simulation, indent=2), "sim/v1")
+        firmware_artifact_body = generate_image_robot_firmware_artifact(spec_doc, simulation)
+        store_artifact(job, "code", firmware_artifact_body, "forgebot-mechatronics-firmware/v1")
         if blockers:
             freecad_result = {"schema_version": "forgebot-freecad-export/v1", "status": "blocked", "message": "FreeCAD export was skipped because the URDF or design validation found blockers."}
         else:
@@ -168,7 +175,7 @@ def run_from_approval(job: Job) -> dict:
         )
         store_artifact(job, "manifest", manifest_json(manifest), "export/v1")
         job.transition(states.SUCCEEDED)
-        return {"passed": True, "blockers": 0, "assembly_validation": assembly_validation["status"], "freecad_export": freecad_result["status"], "simulation": "not run; concept geometry only"}
+        return {"passed": bool(simulation.get("passed", True)), "blockers": 0, "assembly_validation": assembly_validation["status"], "freecad_export": freecad_result["status"], "simulation": "simulated"}
     if spec_doc.get("robot_class") == "tabletop_robot_arm":
         urdf = generate_arm_urdf(spec_doc)
         code = generate_arm_starter_code(spec_doc)

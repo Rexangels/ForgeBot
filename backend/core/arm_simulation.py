@@ -288,6 +288,18 @@ def run_arm_simulation(spec: dict, pick_target=None, place_target=None, *, train
     # Reach/limit errors are surfaced before starting the physics run.
     _joint_targets(spec, pick)
     _joint_targets(spec, place)
+    # Advisory collision prediction from the same capsule model the kinematic
+    # preview gate uses. It never changes acceptance; MuJoCo contacts decide.
+    from .arm_collision import check_arm_path, workcell_obstacles
+    lifted_pick = (pick[0], pick[1], pick[2] + 0.1)
+    lifted_place = (place[0], place[1], place[2] + 0.1)
+    prediction_waypoints = [
+        _joint_targets(spec, pick),
+        _joint_targets(spec, lifted_pick),
+        _joint_targets(spec, lifted_place),
+        _joint_targets(spec, place),
+    ]
+    collision_prediction = check_arm_path(spec, prediction_waypoints, workcell_obstacles(pick, place))
     gains = [80.0, 80.0, 60.0, 35.0]
     training = {"status": "not_requested", "method": "none"}
     if train:
@@ -345,6 +357,7 @@ def run_arm_simulation(spec: dict, pick_target=None, place_target=None, *, train
         "acceptance_checks": checks,
         "failure_reasons": failure_reasons,
         "metrics": {key: result[key] for key in ("goal_error_m", "peak_tracking_error_m", "contacts_seen", "observed_contacts", "grasp_contact_seen", "payload_lifted", "payload_released", "payload_resting_on_table", "peak_gripper_contact_force_n", "gripper_positions_m", "payload_final_m", "unexpected_contacts", "peak_joint_velocity_rad_s")},
+        "collision_prediction": {"predicted_clear": not collision_prediction, "findings": collision_prediction, "method": "capsule link model checked at pick, lifted transfer, and place waypoints; advisory only"},
         "trajectory": result["frames"],
         "assumptions": ["The physics model is generated from simplified primitive geometry and estimated inertias.", f"The task uses a 30 mm cube with the reviewed payload mass ({spec['payload_kg']:.3f} kg).", "Grasp retention is determined by simulated finger contact, friction, and grip actuator force limits; no weld or ideal grasp constraint is used.", "No real camera, actuator, manufacturing tolerance, or safety controller is included."],
         "label": "MuJoCo physics simulation; engineering review required",

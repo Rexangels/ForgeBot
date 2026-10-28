@@ -19,7 +19,9 @@ CANCELLED = "cancelled"
 TERMINAL = frozenset({SUCCEEDED, FAILED, CANCELLED})
 
 _TRANSITIONS: dict[str, frozenset[str]] = {
-    QUEUED: frozenset({SPECIFYING, CANCELLED}),
+    # QUEUED may fail directly when a claim is impossible (unknown task kind)
+    # or a handler rejects the input before any work stage starts.
+    QUEUED: frozenset({SPECIFYING, FAILED, CANCELLED}),
     SPECIFYING: frozenset({AWAITING_REVIEW, FAILED, CANCELLED}),
     AWAITING_REVIEW: frozenset({GENERATING, CANCELLED}),
     GENERATING: frozenset({VALIDATING, FAILED, CANCELLED}),

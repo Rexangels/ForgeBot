@@ -129,6 +129,46 @@ def _finite_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
+def _motor_sizing_errors(spec: dict) -> list[str]:
+    """Flag actuators that cannot plausibly hold the reviewed load.
+
+    Uses a conservative static estimate: the shoulder must hold the distal
+    mass plus payload at full reach, the elbow a fraction of that, and the
+    gripper twice the payload weight. These are estimates, not actuator
+    certification; failures name the margin so a reviewer can judge them.
+    """
+    errors: list[str] = []
+    try:
+        geometry = spec["geometry"]
+        masses = spec["masses"]
+        payload = spec["payload_kg"]
+        reach = geometry["upper_arm_length_m"] + geometry["forearm_length_m"] + geometry["wrist_length_m"]
+        distal = payload + masses["tool_kg"] + masses["wrist_kg"] + masses["forearm_kg"] + 0.5 * masses["upper_arm_kg"]
+        holding_nm = distal * 9.81 * reach
+        efforts = {item["name"]: item["effort_nm"] for item in spec["joint_limits"]}
+    except (KeyError, TypeError, AttributeError):
+        return errors
+    if not all(_finite_number(value) for value in (reach, distal, holding_nm, *efforts.values())):
+        return errors
+    checks = (
+        ("shoulder_pitch", holding_nm, "full-reach holding torque"),
+        ("elbow_pitch", 0.4 * holding_nm, "folded-load torque share"),
+    )
+    for name, required, what in checks:
+        if efforts[name] < required:
+            errors.append(
+                f"{name} effort {efforts[name]:.2f} Nm is below the estimated {what} "
+                f"of {required:.2f} Nm for the reviewed masses and payload; increase actuator sizing or reduce load/reach."
+            )
+    grip = spec.get("gripper", {}).get("grip_force_n")
+    if _finite_number(grip) and grip < 2 * payload * 9.81:
+        errors.append(
+            f"grip force {grip:.2f} N is below twice the payload weight "
+            f"({2 * payload * 9.81:.2f} N); the grasp has no friction margin."
+        )
+    return errors
+
+
 def validate_arm_design(spec: dict) -> list[str]:
     """Semantic checks that complement Meta's constrained JSON response."""
     errors: list[str] = []
@@ -181,6 +221,7 @@ def validate_arm_design(spec: dict) -> list[str]:
         for key in ("base_kg", "shoulder_kg", "upper_arm_kg", "forearm_kg", "wrist_kg", "tool_kg"):
             if not _finite_number(masses.get(key)) or masses[key] <= 0:
                 errors.append(f"masses.{key} must be a finite positive number")
+    errors.extend(_motor_sizing_errors(spec))
     gripper = spec.get("gripper")
     if not isinstance(gripper, dict):
         errors.append("gripper must be an object")
@@ -193,6 +234,14 @@ def validate_arm_design(spec: dict) -> list[str]:
         errors.append("BOM must contain at least four proposed components")
     elif any(not isinstance(item, dict) or item.get("availability") != "unverified" for item in bom):
         errors.append("all generated BOM items must remain marked unverified")
+    elif any(not item.get("component") or not item.get("purpose") for item in bom):
+        errors.append("every BOM item must name its component and purpose")
+    for key in ("name", "summary"):
+        if not isinstance(spec.get(key), str) or not spec[key].strip():
+            errors.append(f"{key} must be a non-empty string")
+    for key in ("assumptions", "open_questions"):
+        if not isinstance(spec.get(key), list) or any(not isinstance(item, str) for item in spec[key]):
+            errors.append(f"{key} must be a list of strings")
     return errors
 
 

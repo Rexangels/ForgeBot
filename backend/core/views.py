@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 from django.conf import settings
 from django.contrib.auth.decorators import login_required
@@ -24,6 +25,24 @@ def _forbidden(request) -> JsonResponse | None:
 
 def _project_owned(request, project_id: int) -> Project:
     return get_object_or_404(Project, id=project_id, owner=request.user)
+
+
+def _enforce_quotas(request, project, key: str):
+    """Refuse new job rows past quota; idempotent replays bypass untouched."""
+    from .quotas import QuotaExceeded, check_job_quotas
+
+    if Job.objects.filter(project=project, idempotency_key=key).exists():
+        return None
+    try:
+        check_job_quotas(project, request.user)
+    except QuotaExceeded as exc:
+        return JsonResponse({"error": str(exc)}, status=409)
+    return None
+
+
+def _audit(job, request, detail: dict) -> None:
+    """Record who triggered a state-changing human action on a job."""
+    JobEvent.objects.create(job=job, state=job.state, actor=request.user.username, detail=detail)
 
 
 @require_POST
@@ -55,6 +74,9 @@ def create_job(request, project_id: int):
     key = (payload.get("idempotency_key") or "").strip()
     if not key:
         return JsonResponse({"error": "idempotency_key is required"}, status=400)
+    quota_denied = _enforce_quotas(request, project, key)
+    if quota_denied is not None:
+        return quota_denied
     job, created = Job.objects.get_or_create(
         project=project,
         idempotency_key=key,
@@ -104,6 +126,39 @@ def get_job(request, job_id: int):
 
 
 @require_POST
+def simulate_humanoid(request, job_id: int):
+    """Run the MuJoCo stand/reach/step scenarios for a saved humanoid spec."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This job has no saved specification."}, status=409)
+    try:
+        from .humanoid import ROBOT_CLASS
+        from .humanoid_simulation import HUMANOID_SIM_SCHEMA, HumanoidSimulationError, run_humanoid_simulation
+
+        spec = json.loads(spec_artifact.body)
+        if spec.get("robot_class") != ROBOT_CLASS:
+            return JsonResponse({"error": "Humanoid simulation needs a research-humanoid specification."}, status=409)
+        result = run_humanoid_simulation(spec)
+    except (json.JSONDecodeError, TypeError, AttributeError) as exc:
+        return JsonResponse({"error": f"Saved specification is unreadable: {exc}"}, status=409)
+    except HumanoidSimulationError as exc:
+        return JsonResponse({"error": str(exc)}, status=422)
+    artifact = store_artifact(job, "humanoid_sim", json.dumps(result, indent=2), HUMANOID_SIM_SCHEMA)
+    JobEvent.objects.create(job=job, state=job.state, detail={"stage": "humanoid_simulation", "passed": result["passed"], "checks": result["acceptance_checks"]})
+    return JsonResponse({
+        "artifact_id": artifact.id,
+        "passed": result["passed"],
+        "acceptance_checks": result["acceptance_checks"],
+        "scenarios": result["scenarios"],
+        "assumptions": result["assumptions"],
+    })
+
+
+@require_POST
 def cancel_job(request, job_id: int):
     denied = _forbidden(request)
     if denied:
@@ -111,10 +166,16 @@ def cancel_job(request, job_id: int):
     job = get_object_or_404(Job, id=job_id, project__owner=request.user)
     if job.state in states.TERMINAL:
         return JsonResponse({"id": job.id, "state": job.state})
+    # Cooperative cancellation: the flag stops queued claims and is checked
+    # by queue handlers before expensive stages; the transition keeps
+    # partial artifacts available for review.
+    job.cancel_requested = True
+    job.save(update_fields=["cancel_requested", "updated_at"])
     try:
         job.transition(states.CANCELLED)
     except ValueError as exc:
-        return JsonResponse({"error": str(exc)}, status=409)
+        return JsonResponse({"error": str(exc), "cancel_requested": True}, status=409)
+    _audit(job, request, {"stage": "cancelled"})
     return JsonResponse({"id": job.id, "state": job.state})
 
 
@@ -214,6 +275,19 @@ def create_image_design(request, project_id: int):
     content_type = image_file.content_type or ""
     if not _image_format_allowed(content_type, image):
         return JsonResponse({"error": "Upload a valid JPEG, PNG, or WebP reference image."}, status=400)
+    from .image_design import _clean_view_label
+    extra_views = []
+    for slot in ("2", "3"):
+        extra_file = request.FILES.get(f"image_{slot}")
+        if extra_file is None:
+            continue
+        if not upload_size_ok(extra_file.size):
+            return JsonResponse({"error": f"Image must be no larger than {settings.FORGEBOT_MAX_UPLOAD_MB:g} MB."}, status=413)
+        extra_bytes = extra_file.read()
+        extra_type = extra_file.content_type or ""
+        if not _image_format_allowed(extra_type, extra_bytes):
+            return JsonResponse({"error": f"Reference view {slot} must be a valid JPEG, PNG, or WebP image."}, status=400)
+        extra_views.append((extra_bytes, extra_type, _clean_view_label(request.POST.get(f"view_{slot}", "other"))))
     brief = (request.POST.get("brief") or "").strip()
     constraints = (request.POST.get("constraints") or "").strip()
     if not brief or len(brief) > 2000 or len(constraints) > 2000:
@@ -225,7 +299,11 @@ def create_image_design(request, project_id: int):
     key = (request.POST.get("idempotency_key") or "").strip()
     if not key:
         return JsonResponse({"error": "idempotency_key is required."}, status=400)
-    mission = {"robot_class": "image_robot_design", "brief": brief, "target_height_m": height, "constraints": constraints}
+    quota_denied = _enforce_quotas(request, project, key)
+    if quota_denied is not None:
+        return quota_denied
+    local_only = (request.POST.get("local_only") or "").strip().lower() in ("1", "true", "yes", "on")
+    mission = {"robot_class": "image_robot_design", "brief": brief, "target_height_m": height, "constraints": constraints, "local_only": local_only}
     job, created = Job.objects.get_or_create(
         project=project,
         idempotency_key=key,
@@ -235,8 +313,102 @@ def create_image_design(request, project_id: int):
         return JsonResponse({"id": job.id, "state": job.state, "created": False}, status=200)
     store_artifact(job, "mission", json.dumps(mission, indent=2), "mission/v1")
     JobEvent.objects.create(job=job, state=job.state, detail={"stage": "queued", "message": "Waiting to design a robot concept from the reference image."})
-    start_image_design(job.id, image, content_type, brief, height, constraints)
+    start_image_design(job.id, image, content_type, brief, height, constraints, extra_views or None, _clean_view_label(request.POST.get("view", "front")), local_only=local_only)
     return JsonResponse({"id": job.id, "state": states.QUEUED, "created": True}, status=202)
+
+
+@require_POST
+def save_calibration(request, project_id: int):
+    """Persist a four-corner planar calibration with its measured accuracy."""
+    from .perception import WORK_AREA_CORNERS, leave_one_out_error, solve_homography
+
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    project = _project_owned(request, project_id)
+    try:
+        payload = json.loads(request.body or b"{}")
+        image_points = payload.get("image_points")
+        world_points = payload.get("world_points") or WORK_AREA_CORNERS
+        label = str(payload.get("label") or "workcell")[:120]
+        homography = solve_homography(image_points, world_points)
+        accuracy = leave_one_out_error(image_points, world_points)
+    except (json.JSONDecodeError, TypeError, AttributeError, ValueError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    record = project.calibrations.create(
+        label=label, image_points=image_points, world_points=world_points,
+        homography=homography, accuracy_m=accuracy,
+    )
+    return JsonResponse({"id": record.id, "label": record.label, "homography": homography, "accuracy_m": accuracy}, status=201)
+
+
+@require_GET
+def latest_calibration(request, project_id: int):
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    project = _project_owned(request, project_id)
+    record = project.calibrations.order_by("-id").first()
+    if record is None:
+        return JsonResponse({"error": "No saved calibration for this project."}, status=404)
+    return JsonResponse({
+        "id": record.id, "label": record.label, "image_points": record.image_points,
+        "world_points": record.world_points, "homography": record.homography,
+        "accuracy_m": record.accuracy_m, "created_at": record.created_at.isoformat(),
+    })
+
+
+@require_POST
+def track_detections(request):
+    """Match one frame's detections to the previous frame's tracks."""
+    from .perception import track_objects
+
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    try:
+        payload = json.loads(request.body or b"{}")
+        previous = payload.get("previous", [])
+        current = payload.get("current", [])
+        if not isinstance(previous, list) or not isinstance(current, list):
+            raise ValueError("previous and current must be detection lists.")
+        tracks = track_objects(previous, current)
+    except (json.JSONDecodeError, TypeError, AttributeError, ValueError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    return JsonResponse({"tracks": tracks})
+
+
+@require_GET
+def ops_summary(request):
+    """Operations snapshot: job states, queue depth, worker activity, failures."""
+    from django.db.models import Count
+    from django.utils import timezone
+
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    by_state = {row["state"]: row["total"] for row in Job.objects.values("state").annotate(total=Count("id"))}
+    queued = list(
+        Job.objects.filter(state=states.QUEUED).order_by("id").values("id", "task_kind", "claimed_by", "attempts", "created_at")[:25]
+    )
+    failed_24h = Job.objects.filter(state=states.FAILED, updated_at__gte=timezone.now() - timezone.timedelta(hours=24)).count()
+    recent_audits = [
+        {"job_id": event.job_id, "actor": event.actor, "state": event.state, "detail": event.detail, "created_at": event.created_at.isoformat()}
+        for event in JobEvent.objects.exclude(actor="").order_by("-id")[:25]
+    ]
+    return JsonResponse({
+        "jobs_by_state": by_state,
+        "queue_depth": Job.objects.filter(state=states.QUEUED, claimed_by="").count(),
+        "claimed": Job.objects.filter(state=states.QUEUED).exclude(claimed_by="").count(),
+        "failed_last_24h": failed_24h,
+        "oldest_queued": queued,
+        "recent_human_actions": recent_audits,
+        "quotas": {
+            "max_active_jobs_per_project": settings.FORGEBOT_MAX_ACTIVE_JOBS_PER_PROJECT,
+            "max_jobs_per_user_per_day": settings.FORGEBOT_MAX_JOBS_PER_USER_PER_DAY,
+            "artifact_retention_days": settings.FORGEBOT_ARTIFACT_RETENTION_DAYS,
+        },
+    })
 
 
 @require_GET
@@ -285,6 +457,9 @@ def create_demo_job(request, project_id: int):
             {"error": f"robot_class must be one of {', '.join(SUPPORTED_ROBOT_CLASSES)}"},
             status=400,
         )
+    quota_denied = _enforce_quotas(request, project, key)
+    if quota_denied is not None:
+        return quota_denied
     job, created = Job.objects.get_or_create(
         project=project,
         idempotency_key=key,
@@ -334,6 +509,7 @@ def approve_job(request, job_id: int):
         )
     summary = run_from_approval(job)
     job.refresh_from_db()
+    _audit(job, request, {"stage": "approved"})
     return JsonResponse({"id": job.id, "state": job.state, "summary": summary})
 
 
@@ -443,6 +619,112 @@ def propose_cad_sketch_edit(request, job_id: int):
 
 
 @require_POST
+def propose_design_revision(request, job_id: int):
+    """Propose one bounded revision from assembly and kernel findings for review."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This design has no saved specification."}, status=409)
+    try:
+        payload = json.loads(request.body or b"{}")
+        spec = json.loads(spec_artifact.body)
+        if spec.get("robot_class") != "image_robot_design":
+            return JsonResponse({"error": "Design revisions are currently available for image-guided robot designs."}, status=409)
+        from .image_design import propose_single_revision, validate_cad_assembly
+        assembly = validate_cad_assembly(spec)
+        findings = [
+            {"severity": item.get("severity"), "code": item.get("code"), "message": item.get("message"),
+             "component_id": item.get("component_id"), "component_ids": item.get("component_ids")}
+            for item in assembly.get("findings", [])
+        ]
+        export_artifact = job.artifacts.filter(kind="cad_export").order_by("-id").first()
+        if export_artifact is not None:
+            try:
+                export_doc = json.loads(export_artifact.body)
+                kernel = export_doc.get("export_report", {}).get("solid_kernel_validation", {})
+                findings.extend(kernel.get("intersections", []))
+                findings.extend([item for item in kernel.get("component_validity", []) if not item.get("valid")])
+            except (json.JSONDecodeError, AttributeError, TypeError):
+                pass
+        if not findings:
+            return JsonResponse({"error": "No assembly or kernel findings to revise; nothing to propose."}, status=409)
+        proposal = propose_single_revision(spec, findings, payload.get("instruction", ""))
+        store_artifact(job, "revision_proposal", json.dumps(proposal, indent=2), "image-robot-revision/v1")
+        JobEvent.objects.create(job=job, state=job.state, detail={"stage": "revision_proposed", "edit_count": len(proposal["edits"])})
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return JsonResponse({"error": "Request body must be a JSON object."}, status=400)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+    except Exception as exc:
+        from .meta_model import MetaModelError
+        if isinstance(exc, MetaModelError):
+            return JsonResponse({"error": str(exc)}, status=502)
+        raise
+    return JsonResponse(proposal)
+
+
+@require_POST
+def apply_design_revision(request, job_id: int):
+    """Apply a human-approved revision proposal and rebuild derived artifacts."""
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    job = get_object_or_404(Job, id=job_id, project__owner=request.user)
+    spec_artifact = job.artifacts.filter(kind="spec").order_by("-id").first()
+    if spec_artifact is None:
+        return JsonResponse({"error": "This design has no saved specification."}, status=409)
+    try:
+        payload = json.loads(request.body or b"{}")
+        proposal = payload.get("proposal")
+        if not isinstance(proposal, dict) or not proposal.get("edits"):
+            raise ValueError("Provide the approved revision proposal to apply.")
+        if not proposal.get("requires_human_review", False):
+            raise ValueError("Only human-reviewed proposals can be applied.")
+        spec = json.loads(spec_artifact.body)
+        if spec.get("robot_class") != "image_robot_design":
+            return JsonResponse({"error": "Design revisions are currently available for image-guided robot designs."}, status=409)
+        mission_artifact = job.artifacts.filter(kind="mission").order_by("-id").first()
+        height = None
+        if mission_artifact is not None:
+            try:
+                height = float(json.loads(mission_artifact.body).get("target_height_m"))
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+                height = None
+        if height is None:
+            grounding = spec.get("grounding", {})
+            height = grounding.get("target_height_m") or (spec.get("estimated_dimensions_m") or {}).get("height") or 0.5
+        from .image_design import apply_revision_edits, generate_cad_package, generate_image_robot_urdf
+        updated = apply_revision_edits(spec, proposal, float(height))
+        updated.setdefault("design_history", []).append({"action": "revision_applied", "component_ids": [item["component_id"] for item in proposal["edits"]]})
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as exc:
+        return JsonResponse({"error": str(exc)}, status=400)
+
+    from .freecad_export import FreeCADError, run_freecad_export
+
+    package = generate_cad_package(updated)
+    try:
+        freecad_result = run_freecad_export(job.id, package)
+    except FreeCADError as exc:
+        return JsonResponse({"error": str(exc)}, status=503)
+    spec_artifact = store_artifact(job, "spec", json.dumps(updated, indent=2), spec_artifact.schema_version)
+    urdf_artifact = store_artifact(job, "urdf", generate_image_robot_urdf(updated), "urdf/v1")
+    cad_artifact = store_artifact(job, "cad", json.dumps(package, indent=2), "forgebot-cad-package/v4")
+    freecad_artifact = store_artifact(job, "cad_export", json.dumps(freecad_result, indent=2), "forgebot-freecad-export/v1")
+    JobEvent.objects.create(job=job, state=job.state, actor=request.user.username, detail={"stage": "revision_applied", "status": "completed", "component_ids": [item["component_id"] for item in proposal["edits"]]})
+    return JsonResponse({
+        "spec_artifact_id": spec_artifact.id,
+        "urdf_artifact_id": urdf_artifact.id,
+        "artifact_id": cad_artifact.id,
+        "freecad_artifact_id": freecad_artifact.id,
+        "freecad_status": freecad_result["status"],
+        "freecad_version": freecad_result.get("freecad_version"),
+    })
+
+
+@require_POST
 def edit_cad_sketches(request, job_id: int):
     """Save reviewed component envelope edits and rebuild their FreeCAD sketches."""
     denied = _forbidden(request)
@@ -475,28 +757,82 @@ def edit_cad_sketches(request, job_id: int):
             elif components[component_id]["geometry"] == "sphere":
                 values = [values[0], values[0], values[0]]
             components[component_id]["dimensions_m"] = values
+            pos = edit.get("position_m")
+            if isinstance(pos, list) and len(pos) == 3:
+                pos_vals = [float(v) for v in pos]
+                if all(math.isfinite(v) and abs(v) <= 5.0 for v in pos_vals):
+                    components[component_id]["position_m"] = pos_vals
         spec.setdefault("design_history", []).append({"action": "component_envelope_edited", "component_ids": [item["id"] for item in edits]})
     except (json.JSONDecodeError, TypeError, ValueError, AttributeError) as exc:
         return JsonResponse({"error": str(exc)}, status=400)
 
-    from .image_design import generate_cad_package, generate_image_robot_urdf
+    from .image_design import (
+        generate_cad_package,
+        generate_image_robot_firmware_artifact,
+        generate_image_robot_urdf,
+        simulate_image_robot,
+    )
     from .freecad_export import FreeCADError, run_freecad_export
+
+    prev_sim_art = job.artifacts.filter(kind="sim").order_by("-id").first()
+    prev_sim = None
+    if prev_sim_art is not None:
+        try:
+            prev_sim = json.loads(prev_sim_art.body)
+        except (json.JSONDecodeError, TypeError):
+            prev_sim = None
 
     package = generate_cad_package(spec)
     try:
         freecad_result = run_freecad_export(job.id, package)
     except FreeCADError as exc:
         return JsonResponse({"error": str(exc)}, status=503)
+    sim_result = simulate_image_robot(spec)
+    if prev_sim:
+        prev_stab = prev_sim.get("stability") or {}
+        new_stab = sim_result.get("stability") or {}
+        prev_mp = prev_sim.get("mass_properties") or {}
+        new_mp = sim_result.get("mass_properties") or {}
+        prev_ot = (prev_sim.get("obstacle_training") or {}).get("best_episode") or {}
+        new_ot = (sim_result.get("obstacle_training") or {}).get("best_episode") or {}
+        sim_result["codesign_comparison"] = {
+            "edited_components": [item["id"] for item in edits],
+            "tip_over_deg": {
+                "before": round(float(prev_stab.get("tip_over_angle_deg", 0.0)), 1),
+                "after": round(float(new_stab.get("tip_over_angle_deg", 0.0)), 1),
+            },
+            "stability_margin_mm": {
+                "before": round(float(prev_stab.get("stability_margin_m", 0.0)) * 1000.0, 1),
+                "after": round(float(new_stab.get("stability_margin_m", 0.0)) * 1000.0, 1),
+            },
+            "com_height_mm": {
+                "before": round(float(prev_mp.get("com_height_above_ground_m", 0.0)) * 1000.0, 1),
+                "after": round(float(new_mp.get("com_height_above_ground_m", 0.0)) * 1000.0, 1),
+            },
+            "peak_roll_deg": {
+                "before": round(float(prev_ot.get("peak_roll_deg", 0.0)), 2),
+                "after": round(float(new_ot.get("peak_roll_deg", 0.0)), 2),
+            },
+            "min_clearance_mm": {
+                "before": round(float(prev_ot.get("min_clearance_m", 0.0)) * 1000.0, 1),
+                "after": round(float(new_ot.get("min_clearance_m", 0.0)) * 1000.0, 1),
+            },
+        }
+    code_body = generate_image_robot_firmware_artifact(spec, sim_result)
     spec_artifact = store_artifact(job, "spec", json.dumps(spec, indent=2), spec_artifact.schema_version)
     urdf_artifact = store_artifact(job, "urdf", generate_image_robot_urdf(spec), "urdf/v1")
     cad_artifact = store_artifact(job, "cad", json.dumps(package, indent=2), "forgebot-cad-package/v4")
     freecad_artifact = store_artifact(job, "cad_export", json.dumps(freecad_result, indent=2), "forgebot-freecad-export/v1")
-    JobEvent.objects.create(job=job, state=job.state, detail={"stage": "sketch_edit", "status": "completed", "component_ids": [item["id"] for item in edits]})
+    sim_artifact = store_artifact(job, "sim", json.dumps(sim_result, indent=2), "sim/v1")
+    code_artifact = store_artifact(job, "code", code_body, "forgebot-mechatronics-firmware/v1")
+    JobEvent.objects.create(job=job, state=job.state, actor=request.user.username, detail={"stage": "sketch_edit", "status": "completed", "component_ids": [item["id"] for item in edits]})
     return JsonResponse({
         "spec_artifact_id": spec_artifact.id,
         "urdf_artifact_id": urdf_artifact.id,
         "artifact_id": cad_artifact.id,
         "freecad_artifact_id": freecad_artifact.id,
+        "sim_artifact_id": sim_artifact.id,
+        "code_artifact_id": code_artifact.id,
         "freecad_status": freecad_result["status"],
         "freecad_version": freecad_result.get("freecad_version"),
     })

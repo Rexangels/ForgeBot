@@ -7,11 +7,159 @@ import { STLLoader } from "three/addons/loaders/STLLoader.js";
 const supported = new Set(["glb", "gltf", "stl"]);
 const uid = () => `part-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
-function makeMesh(file, url) {
+function partMaterialParams(part = {}) {
+  const color = /^#[0-9a-fA-F]{6}$/.test(part.color || "") ? part.color : "#4c9b8c";
+  const text = `${part.name || ""} ${part.role || ""} ${part.functionalCategory || ""}`.toLowerCase();
+  if (/(standoff|spacer|pillar|caster|shaft|bearing|sonar|transducer|aluminum|steel|metal)/.test(text)) {
+    return { color, metalness: 0.72, roughness: 0.28 };
+  }
+  if (/(wheel|tire|roller|tread|foot|feet|rubber)/.test(text)) {
+    return { color, metalness: 0.08, roughness: 0.84 };
+  }
+  if (/(plate|deck|acrylic|panel|chassis)/.test(text)) {
+    return { color, metalness: 0.14, roughness: 0.24, transparent: true, opacity: 0.9 };
+  }
+  if (/(pcb|board|controller|arduino|raspberry|breadboard|ultrasonic|sensor)/.test(text)) {
+    return { color, metalness: 0.24, roughness: 0.44 };
+  }
+  if (/(motor|gear|servo|actuator)/.test(text)) {
+    return { color, metalness: 0.32, roughness: 0.38 };
+  }
+  return { color, metalness: 0.18, roughness: 0.52 };
+}
+
+function applySubVisualVertexColors(geometry, visuals, fallbackHex) {
+  if (!Array.isArray(visuals) || visuals.length <= 1 || !geometry.attributes?.position) return false;
+  const pos = geometry.attributes.position;
+  const count = pos.count;
+  const colors = new Float32Array(count * 3);
+  const baseColor = new THREE.Color(/^#[0-9a-fA-F]{6}$/.test(visuals[0]?.color || "") ? visuals[0].color : fallbackHex);
+  const details = visuals.slice(1).map((vis) => {
+    const dims = (vis.dimensions_m || [0.01, 0.01, 0.01]).map((v) => Number(v) * 1000);
+    const orig = (vis.origin_m || [0, 0, 0]).map((v) => Number(v) * 1000);
+    const rpy = (vis.rpy || [0, 0, 0]).map(Number);
+    const rot = new THREE.Euler(rpy[0] || 0, rpy[1] || 0, rpy[2] || 0, "XYZ");
+    const invQuat = new THREE.Quaternion().setFromEuler(rot).invert();
+    return {
+      dims,
+      orig: new THREE.Vector3(orig[0], orig[1], orig[2]),
+      invQuat,
+      color: new THREE.Color(/^#[0-9a-fA-F]{6}$/.test(vis.color || "") ? vis.color : fallbackHex),
+      volume: dims[0] * dims[1] * dims[2],
+    };
+  }).sort((a, b) => a.volume - b.volume);
+
+  const v = new THREE.Vector3();
+  const tol = 0.45;
+  for (let i = 0; i < count; i += 3) {
+    let picked = baseColor;
+    for (const d of details) {
+      const hx = d.dims[0] / 2 + tol;
+      const hy = d.dims[1] / 2 + tol;
+      const hz = d.dims[2] / 2 + tol;
+      let allInside = true;
+      for (let k = 0; k < 3; k += 1) {
+        v.set(
+          pos.getX(i + k) - d.orig.x,
+          pos.getY(i + k) - d.orig.y,
+          pos.getZ(i + k) - d.orig.z
+        ).applyQuaternion(d.invQuat);
+        if (Math.abs(v.x) > hx || Math.abs(v.y) > hy || Math.abs(v.z) > hz) {
+          allInside = false;
+          break;
+        }
+      }
+      if (allInside) {
+        picked = d.color;
+        break;
+      }
+    }
+    for (let k = 0; k < 3; k += 1) {
+      const idx = (i + k) * 3;
+      colors[idx] = picked.r;
+      colors[idx + 1] = picked.g;
+      colors[idx + 2] = picked.b;
+    }
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  return true;
+}
+
+function pointToSegmentDistSq(px, py, pz, ax, ay, az, bx, by, bz) {
+  const abx = bx - ax;
+  const aby = by - ay;
+  const abz = bz - az;
+  const lenSq = abx * abx + aby * aby + abz * abz;
+  let t = 0;
+  if (lenSq > 1e-6) {
+    t = ((px - ax) * abx + (py - ay) * aby + (pz - az) * abz) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+  }
+  const dx = px - (ax + t * abx);
+  const dy = py - (ay + t * aby);
+  const dz = pz - (az + t * abz);
+  return dx * dx + dy * dy + dz * dz;
+}
+
+function applyCableSegmentVertexColors(geometry, cables, fallbackHex) {
+  if (!Array.isArray(cables) || !cables.length || !geometry.attributes?.position) return false;
+  const pos = geometry.attributes.position;
+  const count = pos.count;
+  const colors = new Float32Array(count * 3);
+  const defaultColor = new THREE.Color(fallbackHex || "#ef4444");
+  const segments = [];
+  for (const cable of cables) {
+    const pts = cable.points_m || [];
+    const col = new THREE.Color(/^#[0-9a-fA-F]{6}$/.test(cable.color || "") ? cable.color : "#ef4444");
+    for (let s = 0; s < pts.length - 1; s += 1) {
+      segments.push({
+        ax: Number(pts[s][0]) * 1000,
+        ay: Number(pts[s][1]) * 1000,
+        az: Number(pts[s][2]) * 1000,
+        bx: Number(pts[s + 1][0]) * 1000,
+        by: Number(pts[s + 1][1]) * 1000,
+        bz: Number(pts[s + 1][2]) * 1000,
+        color: col,
+      });
+    }
+  }
+  if (!segments.length) return false;
+  for (let i = 0; i < count; i += 3) {
+    const cx = (pos.getX(i) + pos.getX(i + 1) + pos.getX(i + 2)) / 3;
+    const cy = (pos.getY(i) + pos.getY(i + 1) + pos.getY(i + 2)) / 3;
+    const cz = (pos.getZ(i) + pos.getZ(i + 1) + pos.getZ(i + 2)) / 3;
+    let picked = defaultColor;
+    let bestDistSq = Infinity;
+    for (const seg of segments) {
+      const dSq = pointToSegmentDistSq(cx, cy, cz, seg.ax, seg.ay, seg.az, seg.bx, seg.by, seg.bz);
+      if (dSq < bestDistSq) {
+        bestDistSq = dSq;
+        picked = seg.color;
+      }
+    }
+    for (let k = 0; k < 3; k += 1) {
+      const idx = (i + k) * 3;
+      colors[idx] = picked.r;
+      colors[idx + 1] = picked.g;
+      colors[idx + 2] = picked.b;
+    }
+  }
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  return true;
+}
+
+function makeMesh(file, url, part = {}) {
   const ext = file.name.split(".").pop().toLowerCase();
   if (ext === "stl") return new STLLoader().loadAsync(url).then((geometry) => {
     geometry.computeVertexNormals();
-    return new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: "#4c9b8c", metalness: 0.15, roughness: 0.58 }));
+    const matParams = partMaterialParams(part);
+    const hasVertexColors =
+      applySubVisualVertexColors(geometry, part.visuals, matParams.color) ||
+      applyCableSegmentVertexColors(geometry, part.cables, matParams.color);
+    const material = new THREE.MeshStandardMaterial(
+      hasVertexColors ? { ...matParams, color: "#ffffff", vertexColors: true } : matParams
+    );
+    return new THREE.Mesh(geometry, material);
   });
   return new GLTFLoader().loadAsync(url).then((gltf) => gltf.scene);
 }
@@ -20,7 +168,7 @@ function boundsOverlap(a, b) {
   return a.min[0] < b.max[0] && a.max[0] > b.min[0] && a.min[1] < b.max[1] && a.max[1] > b.min[1] && a.min[2] < b.max[2] && a.max[2] > b.min[2];
 }
 
-export default function ComponentAssemblyEditor({ freecadExport = null, designSpec = null, onInspectComponent, onProposeSketchEdit, onApplySketchEdit, busy = false }) {
+export default function ComponentAssemblyEditor({ freecadExport = null, designSpec = null, onInspectComponent, onProposeSketchEdit, onApplySketchEdit, onProposeDesignRevision, onApplyDesignRevision, busy = false }) {
   const mountRef = useRef(null);
   const sceneRef = useRef(null);
   const meshByPartIdRef = useRef(new Map());
@@ -38,6 +186,8 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
   const [editInstruction, setEditInstruction] = useState("");
   const [editProposal, setEditProposal] = useState(null);
   const [proposalDimensions, setProposalDimensions] = useState(["", "", ""]);
+  const [revisionProposal, setRevisionProposal] = useState(null);
+  const [revisionNotice, setRevisionNotice] = useState("");
   const autoImportRef = useRef(null);
   const autoPartIdsRef = useRef(new Set());
 
@@ -88,7 +238,11 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
         const designComponent = designSpec?.components?.find((item) => item.id === component.id);
         return {
           id: ids.get(component.id), name: component.name || file.name, file, url,
-          designId: component.id, role: designComponent?.role || "", geometry: designComponent?.geometry || "", dimensions_m: designComponent?.dimensions_m || null,
+          designId: component.id, role: designComponent?.role || component.role || "", geometry: designComponent?.geometry || "", dimensions_m: designComponent?.dimensions_m || null,
+          color: designComponent?.color || component.color || "#4c9b8c",
+          functionalCategory: designComponent?.functional_category || component.functional_category || "",
+          visuals: component.visuals || null,
+          cables: component.cables || null,
           mount: component.child_mount || "origin", parentMount: component.parent_mount || "origin",
           interfaces: component.mount_interfaces || [], parent, position: position.map(Number), scale: 1,
           bounds: null, loadError: "", importOrder: index,
@@ -144,6 +298,26 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
     setEditProposal(proposal);
     setProposalDimensions(proposal.dimensions_m.map((value) => (Number(value) * 1000).toFixed(1)));
   };
+  const proposeDesignRevision = async () => {
+    if (!onProposeDesignRevision) return;
+    setRevisionNotice("");
+    try {
+      setRevisionProposal(await onProposeDesignRevision(""));
+    } catch (err) {
+      setRevisionNotice(err.message || "Could not propose a revision.");
+    }
+  };
+  const applyDesignRevision = async () => {
+    if (!revisionProposal || !onApplyDesignRevision) return;
+    setRevisionNotice("");
+    try {
+      await onApplyDesignRevision(revisionProposal);
+      setRevisionProposal(null);
+      setRevisionNotice("Revision applied and CAD rebuilt. Review the new validation below.");
+    } catch (err) {
+      setRevisionNotice(err.message || "Could not apply the revision.");
+    }
+  };
   const applySelectedEdit = () => {
     if (!selectedModelComponent || !editProposal || !onApplySketchEdit) return;
     const geometry = selectedModelComponent.geometry;
@@ -196,8 +370,13 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
         const position = component.relative_position_mm || component.relative_xyz;
         if (!Array.isArray(position) || position.length !== 3 || position.some((value) => !Number.isFinite(Number(value)))) throw new Error(`Placement coordinates are invalid for ${component.name || component.id}.`);
         const url = URL.createObjectURL(file);
+        const designComponent = designSpec?.components?.find((item) => item.id === component.id);
         imported.push({
           id: ids.get(component.id), name: component.name || file.name, file, url,
+          designId: component.id, role: designComponent?.role || component.role || "", geometry: designComponent?.geometry || "", dimensions_m: designComponent?.dimensions_m || null,
+          color: designComponent?.color || component.color || "#4c9b8c",
+          functionalCategory: designComponent?.functional_category || component.functional_category || "",
+          visuals: component.visuals || null,
           mount: component.child_mount || "origin", parentMount: component.parent_mount || "origin",
           interfaces: component.mount_interfaces || [], parent, position: position.map(Number), scale: 1,
           bounds: null, loadError: "", importOrder: index,
@@ -250,11 +429,11 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
     const controls = new OrbitControls(camera, renderer.domElement); controls.target.set(0, 0, 0.25); controls.enableDamping = true;
     let alive = true; const resources = [];
     parts.forEach((part) => {
-      makeMesh(part.file, part.url).then((object) => {
+      makeMesh(part.file, part.url, part).then((object) => {
         if (!alive) { object.traverse((item) => { item.geometry?.dispose(); }); return; }
         const unitFactor = unit === "mm" ? 0.001 : 1;
         object.name = part.name; object.userData.partId = part.id; object.scale.setScalar((Number(part.scale) || 1) * unitFactor); object.position.set(...(assembly.positions.get(part.id) || part.position.map(Number)).map((value) => Number(value) * unitFactor));
-        object.traverse((item) => { if (item.isMesh) { item.castShadow = true; item.material = item.material || new THREE.MeshStandardMaterial({ color: "#4c9b8c" }); } });
+        object.traverse((item) => { if (item.isMesh) { item.castShadow = true; item.material = item.material || new THREE.MeshStandardMaterial(partMaterialParams(part)); } });
         scene.add(object); resources.push(object); meshByPartIdRef.current.set(part.id, object);
         if (selectedPartIdRef.current === part.id) selectPart(part.id);
         const box = new THREE.Box3().setFromObject(object);
@@ -281,7 +460,7 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
     const observer = new ResizeObserver(resize); observer.observe(mount); resize();
     let frame; const render = () => { controls.update(); renderer.render(scene, camera); frame = requestAnimationFrame(render); }; render();
     return () => { alive = false; cancelAnimationFrame(frame); observer.disconnect(); controls.dispose(); renderer.domElement.removeEventListener("pointerdown", onPointerDown); renderer.domElement.removeEventListener("pointerup", onPointerUp); if (selectionHelperRef.current) { scene.remove(selectionHelperRef.current); selectionHelperRef.current.geometry.dispose(); selectionHelperRef.current.material.dispose(); selectionHelperRef.current = null; } resources.forEach((object) => { object.traverse((item) => { item.geometry?.dispose(); if (Array.isArray(item.material)) item.material.forEach((material) => material.dispose()); else item.material?.dispose(); }); }); meshByPartIdRef.current.clear(); sceneRef.current = null; renderer.dispose(); renderer.domElement.remove(); };
-  }, [unit, parts.map((part) => `${part.id}:${part.url}:${part.scale}:${part.parent}:${part.position.join(",")}`).join("|"), selectPart]);
+  }, [unit, parts.map((part) => `${part.id}:${part.url}:${part.scale}:${part.parent}:${part.position.join(",")}:${part.color || ""}`).join("|"), selectPart]);
 
   const exportManifest = () => {
     const manifest = { schema_version: "forgebot-component-assembly/v1", units: unit, components: parts.map(({ id, name, mount, parentMount, parent, position, scale, interfaces }) => { const parentPart = parts.find((item) => item.id === parent); return { id, name, source_file: name, visual_format: name.split(".").pop().toLowerCase(), scale: Number(scale), mounts: interfaces?.length ? interfaces : [{ name: mount, pose: { xyz: [0, 0, 0], rpy: [0, 0, 0] }, interface_key: "unverified" }], assembly: { parent_component: parent, parent_mount: parent === "world" ? "world" : parentMount || parentPart?.mount || "origin", child_mount: mount, relative_xyz: position.map(Number), relative_rpy: [0, 0, 0] } }; }), findings: [...overlaps, ...assemblyFindings].map((message) => ({ severity: "warning", check: "approximate_assembly_validation", message })) };
@@ -292,8 +471,10 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
     <div className="component-toolbar"><div><strong>CAD assembly & component AI</strong><small>Select a robot part in the 3D view or assembly tree to inspect and improve its design.</small></div><div className="component-actions"><label className="component-upload">Import FreeCAD export<input type="file" webkitdirectory="" directory="" onChange={importFreecadFolder} /></label><label className="component-upload component-upload-secondary">Import mesh files<input type="file" accept=".glb,.gltf,.stl" multiple onChange={addFiles} /></label><select aria-label="Assembly units" value={unit} onChange={(event) => setUnit(event.target.value)}><option value="m">Metres</option><option value="mm">Millimetres</option></select><button className="secondary-button" onClick={exportManifest} disabled={!parts.length}>Export manifest</button></div></div>
     {error && <p className="error component-message">{error}</p>}{importMessage && <p className="component-import-message">{importMessage}</p>}
     <div className="component-layout"><div className="component-view" ref={mountRef}><span className="viewport-tag">ASSEMBLY PREVIEW · DRAG TO ORBIT</span>{!parts.length && <div className="component-empty"><strong>Start with component geometry</strong><span>Import GLB, glTF, or STL parts exported from your CAD tool.</span></div>}</div>
-      <div className="component-inspector"><div className="component-section-title"><strong>Assembly tree</strong><span>{parts.length} parts</span></div>{parts.length === 0 ? <p className="muted">Your imported components will appear here.</p> : parts.map((part) => { const parentPart = parts.find((other) => other.id === part.parent); return <article className={`component-card ${selectedPartId === part.id ? "component-card-selected" : ""}`} key={part.id}><div className="component-card-head"><button className="component-select-button" type="button" aria-pressed={selectedPartId === part.id} onClick={() => selectPart(part.id)}>{part.name}</button><button aria-label={`Remove ${part.name}`} onClick={() => { if (selectedPartId === part.id) selectPart(null); URL.revokeObjectURL(part.url); setParts((current) => current.filter((item) => item.id !== part.id)); }}>Remove</button></div>{part.role && <small className="component-role">{part.role} · {part.geometry}</small>}<label>Parent component<select value={part.parent} onChange={(event) => updateParent(part.id, event.target.value)}><option value="world">World / root</option>{parts.filter((other) => other.id !== part.id).map((other) => <option key={other.id} value={other.id}>{other.name}</option>)}</select></label>{part.parent !== "world" && <label>Parent mount frame{parentPart?.interfaces?.length ? <select value={part.parentMount || parentPart.interfaces[0].name} onChange={(event) => update(part.id, "parentMount", event.target.value)}>{parentPart.interfaces.map((item) => <option key={item.name} value={item.name}>{item.name} · {item.type}</option>)}</select> : <input value={part.parentMount || "origin"} onChange={(event) => update(part.id, "parentMount", event.target.value)} />}</label>}<label>Child mount frame{part.interfaces?.length ? <select value={part.mount} onChange={(event) => update(part.id, "mount", event.target.value)}>{part.interfaces.map((item) => <option key={item.name} value={item.name}>{item.name} · {item.type}</option>)}</select> : <input value={part.mount} onChange={(event) => update(part.id, "mount", event.target.value)} />}</label><div className="component-coordinates">{["X", "Y", "Z"].map((axis, index) => <label key={axis}>{axis} ({unit})<input type="number" step="0.01" value={part.position[index]} onChange={(event) => { const position = [...part.position]; position[index] = Number(event.target.value); update(part.id, "position", position); }} /></label>)}</div><label>Visual scale<input type="number" min="0.0001" step="0.1" value={part.scale} onChange={(event) => update(part.id, "scale", Number(event.target.value))} /></label>{part.loadError && <p className="error">{part.loadError}</p>}</article>; })}
-      {selectedPart && <section className="component-ai-panel"><div className="component-section-title"><strong>Selected component</strong><span>{selectedPart.name}</span></div>{selectedModelComponent ? <><p className="muted">{selectedModelComponent.role} · {selectedModelComponent.geometry} · {selectedModelComponent.dimensions_m.map((value) => `${(value * 1000).toFixed(0)} mm`).join(" × ")}</p><label>Ask about this component<textarea rows="2" maxLength="1000" placeholder="What is this part for? How does it connect to the robot?" value={componentQuestion} onChange={(event) => setComponentQuestion(event.target.value)} /></label><button className="secondary-button" type="button" disabled={busy} onClick={() => askAboutSelected().catch(() => {})}>{busy ? "Asking Meta…" : "Ask AI about this part"}</button>{componentAnswer && <div className="component-ai-answer"><strong>{componentAnswer.what_it_is}</strong><p>{componentAnswer.intended_role}</p><strong>In the design model</strong><ul>{componentAnswer.known_from_design.map((item, index) => <li key={index}>{item}</li>)}</ul><strong>Unknown / unverified</strong><ul>{componentAnswer.unknown_or_unverified.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}<label>How should this part improve?<textarea rows="2" maxLength="1200" placeholder="Example: widen the deck to carry a larger sensor" value={editInstruction} onChange={(event) => setEditInstruction(event.target.value)} /></label><button className="secondary-button" type="button" disabled={busy || !editInstruction.trim()} onClick={() => proposeSelectedEdit().catch(() => {})}>{busy ? "Working…" : "Ask AI to propose an edit"}</button>{kernelValidation?.intersections?.some((item) => item.component_ids?.includes(selectedModelComponent.id)) && <button className="secondary-button" type="button" disabled={busy} onClick={() => proposeKernelRepair().catch(() => {})}>{busy ? "Reviewing kernel finding…" : "Ask AI to propose a repair for this finding"}</button>}{editProposal && <div className="cad-sketch-proposal"><strong>Proposal · human review needed</strong><p>{editProposal.rationale}</p><small>{editProposal.review_notes}</small><div className="cad-sketch-dimensions">{(selectedModelComponent.geometry === "cylinder" ? [{ label: "Diameter", index: 0 }, { label: "Length", index: 2 }] : selectedModelComponent.geometry === "sphere" ? [{ label: "Diameter", index: 0 }] : [{ label: "Width", index: 0 }, { label: "Depth", index: 1 }, { label: "Height", index: 2 }]).map(({ label, index }) => <label key={label}>{label} (mm)<input type="number" min="5" max="5000" step="0.1" value={proposalDimensions[index]} onChange={(event) => setProposalDimensions((current) => current.map((value, i) => i === index || (selectedModelComponent.geometry === "cylinder" && index === 0 && i === 1) ? event.target.value : value))} /></label>)}</div><button className="artifact-download" type="button" disabled={busy} onClick={applySelectedEdit}>Accept edit & rebuild CAD</button></div>}<small className="muted">The model reads the saved robot wireframe and latest local kernel findings when available. Its proposal is not verified until rebuilt and checked again; it cannot certify fit, strength, or safety.</small></> : <p className="muted">This is an imported mesh without a matching component in the saved robot design, so AI inspection and sketch editing are unavailable.</p>}</section>}
+      <div className="component-inspector"><div className="component-section-title"><strong>Assembly tree</strong><span>{parts.length} parts</span></div>{parts.length === 0 ? <p className="muted">Your imported components will appear here.</p> : parts.map((part) => { const parentPart = parts.find((other) => other.id === part.parent); return <article className={`component-card ${selectedPartId === part.id ? "component-card-selected" : ""}`} key={part.id}><div className="component-card-head"><button className="component-select-button" type="button" aria-pressed={selectedPartId === part.id} onClick={() => selectPart(part.id)}><span style={{ display: "inline-block", width: 10, height: 10, borderRadius: "50%", backgroundColor: part.color || "#4c9b8c", marginRight: 6, border: "1px solid rgba(0,0,0,0.2)", verticalAlign: "middle" }} />{part.name}</button><button aria-label={`Remove ${part.name}`} onClick={() => { if (selectedPartId === part.id) selectPart(null); URL.revokeObjectURL(part.url); setParts((current) => current.filter((item) => item.id !== part.id)); }}>Remove</button></div>{part.role && <small className="component-role">{part.role} · {part.geometry}</small>}<label>Parent component<select value={part.parent} onChange={(event) => updateParent(part.id, event.target.value)}><option value="world">World / root</option>{parts.filter((other) => other.id !== part.id).map((other) => <option key={other.id} value={other.id}>{other.name}</option>)}</select></label>{part.parent !== "world" && <label>Parent mount frame{parentPart?.interfaces?.length ? <select value={part.parentMount || parentPart.interfaces[0].name} onChange={(event) => update(part.id, "parentMount", event.target.value)}>{parentPart.interfaces.map((item) => <option key={item.name} value={item.name}>{item.name} · {item.type}</option>)}</select> : <input value={part.parentMount || "origin"} onChange={(event) => update(part.id, "parentMount", event.target.value)} />}</label>}<label>Child mount frame{part.interfaces?.length ? <select value={part.mount} onChange={(event) => update(part.id, "mount", event.target.value)}>{part.interfaces.map((item) => <option key={item.name} value={item.name}>{item.name} · {item.type}</option>)}</select> : <input value={part.mount} onChange={(event) => update(part.id, "mount", event.target.value)} />}</label><div className="component-coordinates">{["X", "Y", "Z"].map((axis, index) => <label key={axis}>{axis} ({unit})<input type="number" step="0.01" value={part.position[index]} onChange={(event) => { const position = [...part.position]; position[index] = Number(event.target.value); update(part.id, "position", position); }} /></label>)}</div><label>Visual scale<input type="number" min="0.0001" step="0.1" value={part.scale} onChange={(event) => update(part.id, "scale", Number(event.target.value))} /></label>{part.loadError && <p className="error">{part.loadError}</p>}</article>; })}
+      {designSpec && (designSpec.visual_observation || designSpec.grounding) && <section className="component-ai-panel"><div className="component-section-title"><strong>Visual grounding</strong><span>how the spec was derived</span></div>{(Array.isArray(designSpec.visual_observation) ? designSpec.visual_observation : [designSpec.visual_observation]).filter(Boolean).map((observation, index) => <div key={observation.view || index}><p className="muted">{observation.view && <strong>[{observation.view}] </strong>}{observation.scene_summary}</p><p><small>{observation.observed_assemblies?.length || 0} visible assemblies observed{observation.view ? ` in the ${observation.view} view` : ""}.</small></p></div>)}{designSpec.grounding && <ul>{(designSpec.grounding.notes || []).map((note, index) => <li key={index}><small>{note}</small></li>)}</ul>}</section>}
+      {selectedPart && <section className="component-ai-panel"><div className="component-section-title"><strong>Selected component</strong><span>{selectedPart.name}</span></div>{selectedModelComponent ? <><p className="muted">{selectedModelComponent.role} · {selectedModelComponent.geometry} · {selectedModelComponent.dimensions_m.map((value) => `${(value * 1000).toFixed(0)} mm`).join(" × ")}</p>{(selectedModelComponent.functional_category || Number.isFinite(selectedModelComponent.confidence) || selectedModelComponent.visible_vs_inferred || selectedModelComponent.mount_intent || selectedModelComponent.parent_reason) && <div className="component-ai-answer"><strong>Component reasoning</strong><ul>{selectedModelComponent.functional_category && <li>Function: {selectedModelComponent.functional_category}</li>}{selectedModelComponent.visible_vs_inferred && <li>Evidence: {String(selectedModelComponent.visible_vs_inferred).replace(/_/g, " ")}{Number.isFinite(selectedModelComponent.confidence) ? ` · ${(selectedModelComponent.confidence * 100).toFixed(0)}% confidence` : ""}</li>}{selectedModelComponent.mount_intent && <li>Mount intent: {selectedModelComponent.mount_intent}</li>}{selectedModelComponent.parent_reason && <li>Attached here because: {selectedModelComponent.parent_reason}</li>}{selectedModelComponent.symmetry_group && <li>Mirrored pair: {selectedModelComponent.symmetry_group}</li>}{selectedModelComponent.sub_assembly && <li>Sub-assembly: {selectedModelComponent.sub_assembly}</li>}</ul></div>}<label>Ask about this component<textarea rows="2" maxLength="1000" placeholder="What is this part for? How does it connect to the robot?" value={componentQuestion} onChange={(event) => setComponentQuestion(event.target.value)} /></label><button className="secondary-button" type="button" disabled={busy} onClick={() => askAboutSelected().catch(() => {})}>{busy ? "Asking Meta…" : "Ask AI about this part"}</button>{componentAnswer && <div className="component-ai-answer"><strong>{componentAnswer.what_it_is}</strong><p>{componentAnswer.intended_role}</p><strong>In the design model</strong><ul>{componentAnswer.known_from_design.map((item, index) => <li key={index}>{item}</li>)}</ul><strong>Unknown / unverified</strong><ul>{componentAnswer.unknown_or_unverified.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}<label>How should this part improve?<textarea rows="2" maxLength="1200" placeholder="Example: widen the deck to carry a larger sensor" value={editInstruction} onChange={(event) => setEditInstruction(event.target.value)} /></label><button className="secondary-button" type="button" disabled={busy || !editInstruction.trim()} onClick={() => proposeSelectedEdit().catch(() => {})}>{busy ? "Working…" : "Ask AI to propose an edit"}</button>{kernelValidation?.intersections?.some((item) => item.component_ids?.includes(selectedModelComponent.id)) && <button className="secondary-button" type="button" disabled={busy} onClick={() => proposeKernelRepair().catch(() => {})}>{busy ? "Reviewing kernel finding…" : "Ask AI to propose a repair for this finding"}</button>}{editProposal && <div className="cad-sketch-proposal"><strong>Proposal · human review needed</strong><p>{editProposal.rationale}</p><small>{editProposal.review_notes}</small><div className="cad-sketch-dimensions">{(selectedModelComponent.geometry === "cylinder" ? [{ label: "Diameter", index: 0 }, { label: "Length", index: 2 }] : selectedModelComponent.geometry === "sphere" ? [{ label: "Diameter", index: 0 }] : [{ label: "Width", index: 0 }, { label: "Depth", index: 1 }, { label: "Height", index: 2 }]).map(({ label, index }) => <label key={label}>{label} (mm)<input type="number" min="5" max="5000" step="0.1" value={proposalDimensions[index]} onChange={(event) => setProposalDimensions((current) => current.map((value, i) => i === index || (selectedModelComponent.geometry === "cylinder" && index === 0 && i === 1) ? event.target.value : value))} /></label>)}</div><button className="artifact-download" type="button" disabled={busy} onClick={applySelectedEdit}>Accept edit & rebuild CAD</button></div>}<small className="muted">The model reads the saved robot wireframe and latest local kernel findings when available. Its proposal is not verified until rebuilt and checked again; it cannot certify fit, strength, or safety.</small></> : <p className="muted">This is an imported mesh without a matching component in the saved robot design, so AI inspection and sketch editing are unavailable.</p>}</section>}
+      {designSpec && onProposeDesignRevision && <section className="component-ai-panel"><div className="component-section-title"><strong>Design revision</strong><span>kernel + assembly findings</span></div><p className="muted">Ask Meta for one bounded revision (at most four part edits) against the current findings. Nothing changes until you approve and rebuild.</p><button className="secondary-button" type="button" disabled={busy} onClick={() => proposeDesignRevision().catch(() => {})}>{busy ? "Reviewing findings…" : "Propose revision from findings"}</button>{revisionProposal && <div className="cad-sketch-proposal"><strong>Revision · human review needed</strong><p>{revisionProposal.rationale}</p><ul>{revisionProposal.edits.map((edit) => <li key={edit.component_id}><small><strong>{edit.component_id}</strong>{edit.dimensions_m && <> · dims {(edit.dimensions_m.map((value) => `${(value * 1000).toFixed(0)}`).join(" × "))} mm</>}{edit.position_m && <> · at [{edit.position_m.map((value) => `${(value * 1000).toFixed(0)}`).join(", ")}] mm</>}{edit.reason && <> — {edit.reason}</>}</small></li>)}</ul><button className="artifact-download" type="button" disabled={busy || !onApplyDesignRevision} onClick={() => applyDesignRevision().catch(() => {})}>Accept revision & rebuild CAD</button> <button className="secondary-button" type="button" onClick={() => setRevisionProposal(null)}>Dismiss</button></div>}{revisionNotice && <p className="component-import-message">{revisionNotice}</p>}</section>}
       {(overlaps.length > 0 || assemblyFindings.length > 0) && <div className="component-findings"><strong>Browser assembly findings · approximate</strong>{[...assemblyFindings, ...overlaps].map((message) => <p key={message}>{message}</p>)}</div>}{kernelValidation && <div className="component-findings"><strong>FreeCAD solid-kernel check · {kernelValidation.status?.replace(/_/g, " ")}</strong><p>{kernelValidation.component_validity?.filter((item) => item.valid).length || 0}/{kernelValidation.component_validity?.length || 0} components have valid solids · {kernelValidation.intersections?.length || 0} intersecting or failed pair checks</p>{kernelValidation.intersections?.slice(0, 12).map((item, index) => <p key={`${item.component_ids?.join("-")}-${index}`}>{item.component_ids?.join(" ↔ ")} · {item.status === "check_failed" ? item.message : `${Number(item.intersection_volume_mm3).toFixed(2)} mm³ overlap; review mount intent`}</p>)}{kernelValidation.intersections?.length > 12 && <small>{kernelValidation.intersections.length - 12} more pairs are recorded in the export report.</small>}</div>}<p className="panel-footnote">FreeCAD exact solid checks detect geometric validity and static intersections. Approximate mesh bounds remain visual warnings. Neither check covers moving collisions, mount tolerances, fasteners, strength, or manufacturability.</p></div></div>
   </div>;
 }

@@ -101,6 +101,8 @@ FORGEBOT_JOB_TIMEOUT_S = int(os.environ.get("FORGEBOT_JOB_TIMEOUT_S", "600"))
 FORGEBOT_ARTIFACT_RETENTION_DAYS = int(
     os.environ.get("FORGEBOT_ARTIFACT_RETENTION_DAYS", "14")
 )
+FORGEBOT_MAX_ACTIVE_JOBS_PER_PROJECT = int(os.environ.get("FORGEBOT_MAX_ACTIVE_JOBS_PER_PROJECT", "10"))
+FORGEBOT_MAX_JOBS_PER_USER_PER_DAY = int(os.environ.get("FORGEBOT_MAX_JOBS_PER_USER_PER_DAY", "100"))
 
 # Meta Model API (server-side only). META_API is accepted as a compatibility
 # alias for the key already present in this project's local .env.
@@ -114,3 +116,4 @@ MODEL_API_BASE_URL = os.environ.get(
 ).rstrip("/")
 MODEL_API_PROVIDER = os.environ.get("FORGEBOT_MODEL_PROVIDER", "meta-model-api")
 MODEL_API_NAME = os.environ.get("FORGEBOT_MODEL_NAME", "muse-spark-1.3")
+FORGEBOT_MODEL_TIMEOUT_S = int(os.environ.get("FORGEBOT_MODEL_TIMEOUT_S", "300"))

@@ -186,6 +186,12 @@ Track job success/failure and cancellation rates, queue age, stage latency, mode
 
 - Which physics engine and robot-description subset will be supported first?
 
+Decided 2026-10-27: MuJoCo is ratified for Phase 1/2 acceptance (tabletop-arm contact pick/place, humanoid stand/reach/step scenarios). Isaac Sim stays a Phase 2 evaluation, not a requirement. The supported description subset is primitive-geometry URDF plus the generated MJCF equivalents.
+Decided 2026-10-27: the background-job approach is a database-backed queue claimed by `runworker` (atomic conditional claim, 3 attempts, cooperative cancellation). Redis/Celery stay compose-level options for later scale, not the active path.
+Decided 2026-10-27: retention defaults to 14 days of artifacts (`prune_artifacts` keeps the newest per kind per job); budgets default to 10 active jobs per project and 100 created jobs per user per day, all environment-overridable.
+Decided 2026-10-27: the humanoid 1 m walk uses a scripted feedback gait (ankle push-off, stance-side lateral feedback with capture placement, cruise-integral lean, COM-overrun choke, walk-then-stand), not a learned policy. The MJCF model keeps feet-only collision with adjacent-link exclusions, volume-proportional link masses, and COMs at geometry centers; uniform per-link masses and full-body self-collision were removed after measured phantom contacts fought the servos.
+Decided 2026-10-27: local-only image-to-robot is a text-only provider request (brief plus stdlib-probed container facts; stage-1 observation skipped, everything inferred, human review still required), stamped `pixels_local_only`. Pillow-backed thumbnails are deferred; the sandbox has no network to install them.
+
 ### CAD and component assembly direction
 
 FreeCAD is the recommended first desktop CAD integration because it is open-source and can run locally without a hosted account. ForgeBot should not depend on controlling FreeCAD's GUI. The current file-exchange bridge includes a generated macro that creates grouped primitive solids, retains component/interface metadata in FCStd, and exports a STEP assembly. Next, import that STEP into ForgeBot and use the FreeCAD kernel for validity and interference checks. Blender is useful for visual mesh authoring and GLB export, while FreeCAD is the better fit for dimensioned parts, constrained assemblies, and STEP exchange.
@@ -202,8 +208,14 @@ The browser can validate manifest structure, units, frame references, and approx
 
 First acceptance slice: import two local component meshes, declare one named mount frame on each, attach one component to the other with a rigid transform, show the assembly in the canvas, and report missing frames, unit mismatches, or coarse bounding-box intersections. Export the manifest and a URDF-compatible visual assembly. In image-to-robot jobs, the CAD assembly is the component-aware AI workspace: users select a visible mesh/tree node and ask what it is or request an edit grounded in the saved structured robot component tree (the internal wireframe). The user reviews the explanation/proposed dimensions, then accepts edits before ForgeBot rebuilds URDF, FCStd, STEP, and preview meshes. Box/cylinder geometry is driven by dimensioned sketches and Pads. This still does not provide arbitrary freehand sketching, direct in-browser constraint editing, assembly-joint constraints, or manufacturing validation; sphere visuals remain primitive features. AI explanations/proposals are not engineering certification.
 - Which model providers are available, and what data may be sent to them? If using a local model, which supported model and hardware target will be used?
+
+Decided 2026-10-27: reference images stay local-only. Only text briefs, dimensions, and derived geometry may be sent to Meta; pixels never leave the machine. The current image-to-robot pipeline still sends images at generation time, so this decision opens migration work: a local vision stage (or a text-brief-only path) must replace provider-side image understanding before the policy is true.
 - What are the authentication, retention, budget, and export requirements for the MVP?
+
+Decided 2026-10-27: single local operator per deployment (Django accounts as today); 14-day artifact retention; 10 active jobs per project and 100 daily jobs per user, environment-overridable. Exports carry schema versions and content hashes; no certified-manufacturing claims.
 - Which cloud target, if any, will be used when the local demo moves beyond one developer machine?
+
+Decided 2026-10-27: no cloud target. Docker Compose stays the documented path for a second machine.
 
 ## 11. Claims to keep precise
 
