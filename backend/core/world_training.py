@@ -18,9 +18,9 @@ DEFAULT_OBSTACLES: list[dict[str, Any]] = [
         "id": "obs_pillar_1",
         "name": "Steel Bollard A",
         "shape": "cylinder",
-        "x_m": 0.92,
-        "y_m": 0.14,
-        "radius_m": 0.13,
+        "x_m": 1.25,
+        "y_m": -0.10,
+        "radius_m": 0.14,
         "height_m": 0.32,
         "color": "#ef4444",
     },
@@ -28,9 +28,9 @@ DEFAULT_OBSTACLES: list[dict[str, Any]] = [
         "id": "obs_hazard_drum",
         "name": "Hazard Drum",
         "shape": "cylinder",
-        "x_m": 0.58,
-        "y_m": 0.72,
-        "radius_m": 0.12,
+        "x_m": 0.70,
+        "y_m": 1.15,
+        "radius_m": 0.13,
         "height_m": 0.26,
         "color": "#f97316",
     },
@@ -38,11 +38,11 @@ DEFAULT_OBSTACLES: list[dict[str, Any]] = [
         "id": "obs_crate_1",
         "name": "Supply Crate South",
         "shape": "box",
-        "x_m": 1.62,
-        "y_m": -0.22,
+        "x_m": 2.10,
+        "y_m": 0.10,
         "width_m": 0.28,
         "depth_m": 0.24,
-        "radius_m": 0.17,
+        "radius_m": 0.18,
         "height_m": 0.22,
         "color": "#d97706",
     },
@@ -50,9 +50,9 @@ DEFAULT_OBSTACLES: list[dict[str, Any]] = [
         "id": "obs_pillar_2",
         "name": "Telemetry Mast",
         "shape": "cylinder",
-        "x_m": 1.82,
-        "y_m": 0.72,
-        "radius_m": 0.13,
+        "x_m": 1.45,
+        "y_m": 1.65,
+        "radius_m": 0.14,
         "height_m": 0.38,
         "color": "#ef4444",
     },
@@ -60,8 +60,8 @@ DEFAULT_OBSTACLES: list[dict[str, Any]] = [
         "id": "obs_gate_left",
         "name": "Corridor Gate West",
         "shape": "box",
-        "x_m": 1.92,
-        "y_m": 1.62,
+        "x_m": 1.95,
+        "y_m": 2.25,
         "width_m": 0.24,
         "depth_m": 0.24,
         "radius_m": 0.16,
@@ -72,7 +72,7 @@ DEFAULT_OBSTACLES: list[dict[str, Any]] = [
         "id": "obs_gate_right",
         "name": "Corridor Gate East",
         "shape": "box",
-        "x_m": 2.48,
+        "x_m": 2.85,
         "y_m": 1.05,
         "width_m": 0.24,
         "depth_m": 0.24,
@@ -84,11 +84,11 @@ DEFAULT_OBSTACLES: list[dict[str, Any]] = [
         "id": "obs_crate_2",
         "name": "Barrier Block North",
         "shape": "box",
-        "x_m": 2.65,
-        "y_m": 2.08,
+        "x_m": 3.45,
+        "y_m": 1.55,
         "width_m": 0.26,
         "depth_m": 0.24,
-        "radius_m": 0.16,
+        "radius_m": 0.18,
         "height_m": 0.25,
         "color": "#eab308",
     },
@@ -96,8 +96,8 @@ DEFAULT_OBSTACLES: list[dict[str, Any]] = [
 
 DEFAULT_COURSE_WAYPOINTS: list[tuple[float, float]] = [
     (0.0, 0.0),
-    (1.55, 0.38),
-    (2.25, 1.35),
+    (1.10, 0.55),
+    (2.15, 1.40),
     (3.20, 2.35),
 ]
 
@@ -233,7 +233,7 @@ def _simulate_policy_episode(
     When MuJoCo (`mj_model`/`mj_data`) is provided, steps the 3D rigid-body suspension & contact model at 166 Hz.
     """
     dt = 0.06
-    max_steps = 260
+    max_steps = 360
     x, y = float(waypoints[0][0]), float(waypoints[0][1])
     gx_first, gy_first = float(waypoints[1][0]), float(waypoints[1][1])
     heading = math.atan2(gy_first - y, gx_first - x)
@@ -271,12 +271,12 @@ def _simulate_policy_episode(
     for step in range(max_steps):
         target_x, target_y = float(waypoints[wp_index][0]), float(waypoints[wp_index][1])
         dist_to_wp = math.hypot(target_x - x, target_y - y)
-        if dist_to_wp < 0.22 and wp_index < len(waypoints) - 1:
+        if dist_to_wp < 0.28 and wp_index < len(waypoints) - 1:
             wp_index += 1
             target_x, target_y = float(waypoints[wp_index][0]), float(waypoints[wp_index][1])
             dist_to_wp = math.hypot(target_x - x, target_y - y)
 
-        if wp_index == len(waypoints) - 1 and dist_to_wp < 0.12:
+        if wp_index == len(waypoints) - 1 and dist_to_wp < 0.24:
             trajectory.append({
                 "t": round(sim_time, 2),
                 "x": round(x, 4),
@@ -408,7 +408,7 @@ def _simulate_policy_episode(
 
     final_gx, final_gy = float(waypoints[-1][0]), float(waypoints[-1][1])
     goal_error_m = math.hypot(final_gx - x, final_gy - y)
-    reached_goal = goal_error_m <= 0.22
+    reached_goal = goal_error_m <= 0.28
 
     # Reward function combining goal completion, collision avoidance, clearance margin, and roll stability
     reward = (
@@ -725,15 +725,20 @@ def run_obstacle_world_training(
 
     components = design.get("components", [])
     if components:
-        span_x = max(float(p["position_m"][0]) + float(p["dimensions_m"][0]) / 2.0 for p in components) - min(
-            float(p["position_m"][0]) - float(p["dimensions_m"][0]) / 2.0 for p in components
-        )
-        span_y = max(float(p["position_m"][1]) + float(p["dimensions_m"][1]) / 2.0 for p in components) - min(
-            float(p["position_m"][1]) - float(p["dimensions_m"][1]) / 2.0 for p in components
-        )
-        robot_radius_m = max(0.08, min(0.22, min(span_x, span_y) * 0.45))
+        max_reach = 0.0
+        for p in components:
+            px = float(p.get("position_m", [0, 0, 0])[0])
+            py = float(p.get("position_m", [0, 0, 0])[1])
+            dims = [float(v) for v in p.get("dimensions_m", [0.04, 0.04, 0.02])]
+            dx, dy = dims[0], dims[1]
+            corner_reach = math.hypot(abs(px) + dx / 2.0, abs(py) + dy / 2.0)
+            if corner_reach > max_reach:
+                max_reach = corner_reach
+        half_track = max(0.05, track_width_m / 2.0)
+        outer_wheel_reach = math.hypot(0.22, half_track + 0.04)
+        robot_radius_m = max(0.18, max(max_reach, outer_wheel_reach) + 0.04)
     else:
-        robot_radius_m = 0.14
+        robot_radius_m = max(0.18, track_width_m / 2.0 + 0.06)
 
     wheel_radius_m = max(0.025, wheel_diameter_m / 2.0)
 
@@ -756,12 +761,12 @@ def run_obstacle_world_training(
             mj_model = None
             mj_data = None
 
-    # Episode 1 starts with an aggressive, short-sighted baseline policy that clips obstacles
+    # Episode 1 starts with a baseline policy that iteratively tunes avoidance parameters
     params = {
-        "repulsive_gain": 0.003,
-        "sensor_lookahead_m": 0.13,
-        "cruise_speed_m_s": round(min(1.05, max(0.45, cruise_speed_m_s * 1.15)), 3),
-        "yaw_speed_damping": 0.15,
+        "repulsive_gain": 0.008,
+        "sensor_lookahead_m": 0.35,
+        "cruise_speed_m_s": round(min(0.85, max(0.42, cruise_speed_m_s)), 3),
+        "yaw_speed_damping": 0.18,
         "max_yaw_rate_rad_s": 2.4,
     }
 
@@ -785,12 +790,12 @@ def run_obstacle_world_training(
         # Policy gradient / heuristic update rule based on episode outcome
         next_params = dict(params)
         if ep_result["collisions"] > 0 or ep_result["min_clearance_m"] < 0.055:
-            next_params["repulsive_gain"] = min(0.32, params["repulsive_gain"] * 1.85 + 0.022)
-            next_params["sensor_lookahead_m"] = min(0.72, params["sensor_lookahead_m"] + 0.095)
-            next_params["cruise_speed_m_s"] = max(0.42, params["cruise_speed_m_s"] * 0.93)
+            next_params["repulsive_gain"] = min(0.35, params["repulsive_gain"] * 1.75 + 0.018)
+            next_params["sensor_lookahead_m"] = min(1.35, params["sensor_lookahead_m"] + 0.12)
+            next_params["cruise_speed_m_s"] = max(0.42, params["cruise_speed_m_s"] * 0.95)
         elif ep_result["min_clearance_m"] < 0.095:
-            next_params["repulsive_gain"] = min(0.32, params["repulsive_gain"] * 1.22)
-            next_params["sensor_lookahead_m"] = min(0.72, params["sensor_lookahead_m"] + 0.04)
+            next_params["repulsive_gain"] = min(0.35, params["repulsive_gain"] * 1.25 + 0.006)
+            next_params["sensor_lookahead_m"] = min(1.35, params["sensor_lookahead_m"] + 0.06)
 
         if ep_result["peak_dynamic_roll_ratio"] > 0.30:
             next_params["yaw_speed_damping"] = min(1.15, params["yaw_speed_damping"] + 0.14)

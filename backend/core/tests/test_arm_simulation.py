@@ -64,6 +64,22 @@ class MuJoCoArmSimulationTests(TestCase):
         self.assertEqual(first["metrics"]["goal_error_m"], second["metrics"]["goal_error_m"])
         self.assertGreater(len(first["trajectory"]), 2)
 
+    def test_vision_seeded_pick_runs_and_records_seed(self):
+        seed = {"x": 0.28, "y": 0.0, "z": 0.055, "uncertainty_m": 0.004, "depth_source": "measured"}
+        result = run_arm_simulation(arm_spec(), perceived_target=seed)
+        self.assertTrue(result["passed"], result["metrics"])
+        self.assertEqual(result["task"]["vision_seed"]["depth_source"], "measured")
+        self.assertEqual(result["task"]["pick_target_m"], [0.28, 0.0, 0.055])
+
+    def test_vision_seed_beyond_gate_is_refused(self):
+        seed = {"x": 0.28, "y": 0.0, "uncertainty_m": 0.05, "depth_source": "assumed_plane_40mm"}
+        with self.assertRaises(ArmSimulationError):
+            run_arm_simulation(arm_spec(), perceived_target=seed)
+
+    def test_vision_seed_needs_uncertainty(self):
+        with self.assertRaises(ArmSimulationError):
+            run_arm_simulation(arm_spec(), perceived_target={"x": 0.28, "y": 0.0})
+
     def test_controller_tuning_returns_a_recorded_search(self):
         result = run_arm_simulation(arm_spec(), train=True)
         training = result["controller"]["training"]
@@ -109,6 +125,23 @@ class MuJoCoArmSimulationTests(TestCase):
         artifact = job.artifacts.get(id=response.json()["artifact_id"])
         self.assertEqual(artifact.kind, "sim")
         self.assertEqual(artifact.schema_version, "sim/mujoco-arm/v1")
+
+    @patch("core.arm_simulation.run_arm_simulation")
+    def test_endpoint_forwards_perceived_target(self, run):
+        run.return_value = {"passed": True, "engine": "MuJoCo", "engine_version": "test"}
+        user = User.objects.create_user("seed-user", password="pw")
+        project = Project.objects.create(name="seed", owner=user)
+        job = Job.objects.create(project=project, state=states.SUCCEEDED, idempotency_key="arm-seed")
+        store_artifact(job, "spec", __import__("json").dumps(arm_spec()), ARM_SPEC_SCHEMA_VERSION)
+        self.client.force_login(user)
+        payload = {"perceived_target": {"x": 0.28, "y": 0.0, "uncertainty_m": 0.004, "depth_source": "measured"}}
+        response = self.client.post(
+            f"/api/v1/jobs/{job.id}/simulate-arm",
+            data=__import__("json").dumps(payload),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(run.call_args.kwargs["perceived_target"], payload["perceived_target"])
 
     def test_project_benchmark_runs_same_task_for_recent_arm_designs(self):
         import json

@@ -113,12 +113,53 @@ def _solve_three_point(image_points: list, world_points: list) -> list[float]:
     return [affine[0], affine[1], affine[2], affine[3], affine[4], affine[5], 0.0, 0.0]
 
 
+UNCERTAINTY_GATE_M = 0.01
+
+# 1-sigma depth uncertainty by provenance: measured is tight, single-view
+# geometric height is coarse, and the assumed 40 mm plane is a guess.
+_DEPTH_SIGMA_M = {"measured": 0.005, "geometric_vanishing_height": 0.03, "geometric_affine_height": 0.03, "assumed_plane_40mm": 0.03, "multi_view_triangulation": 0.01}
+
+
+def target_uncertainty(
+    region: dict,
+    homography: list[float],
+    depth_source: str,
+    calibration_error_m: float | None = None,
+) -> dict:
+    """1-sigma target uncertainty from calibration error, box size, and depth provenance.
+
+    sigma_xy combines the saved calibration's worst leave-one-out error with
+    half the detection's ground footprint (box quantization); sigma_z comes
+    from the depth source table. `within_gate` compares the 3D sigma against
+    UNCERTAINTY_GATE_M; callers must refuse or flag picks that miss the gate.
+    """
+    calibration = float(calibration_error_m) if calibration_error_m is not None else 0.02
+    if not math.isfinite(calibration) or calibration < 0:
+        raise ValueError("Calibration error must be a non-negative number of metres.")
+    base_v = float(region["y_max"])
+    left = apply_homography([region["x_min"], base_v], homography)
+    right = apply_homography([region["x_max"], base_v], homography)
+    footprint = math.dist(left, right) / 2.0
+    sigma_xy = math.sqrt(calibration**2 + footprint**2)
+    sigma_z = _DEPTH_SIGMA_M.get(depth_source, 0.03)
+    sigma = math.sqrt(sigma_xy**2 + sigma_z**2)
+    return {
+        "sigma_xy_m": round(sigma_xy, 5),
+        "sigma_z_m": round(sigma_z, 5),
+        "sigma_m": round(sigma, 5),
+        "gate_m": UNCERTAINTY_GATE_M,
+        "within_gate": sigma <= UNCERTAINTY_GATE_M,
+        "basis": "calibration leave-one-out max + half footprint + depth-source sigma",
+    }
+
+
 def map_detection(
     region: dict,
     homography: list[float],
     depth_m: float | None = None,
     estimate_height: bool = False,
     camera_height_m: float = 0.75,
+    calibration_error_m: float | None = None,
 ) -> dict:
     """Map a detection's lower box-center to a workcell target with depth provenance."""
     for key in ("x_min", "y_min", "x_max", "y_max"):
@@ -128,14 +169,19 @@ def map_detection(
     if not region["x_min"] < region["x_max"] or not region["y_min"] < region["y_max"]:
         raise ValueError("Detection regions must have positive area.")
     if estimate_height:
-        return estimate_detection_3d(region, homography, depth_m=depth_m, camera_height_m=camera_height_m)
+        mapped = estimate_detection_3d(region, homography, depth_m=depth_m, camera_height_m=camera_height_m)
+        mapped["uncertainty"] = target_uncertainty(region, homography, mapped["depth_source"], calibration_error_m)
+        return mapped
     x, y = apply_homography([(region["x_min"] + region["x_max"]) / 2, region["y_max"]], homography)
     if depth_m is None:
-        return {"x": round(x, 4), "y": round(y, 4), "z": DEFAULT_OBJECT_HEIGHT_M, "depth_source": "assumed_plane_40mm"}
-    depth = float(depth_m)
-    if not math.isfinite(depth) or not 0 < depth <= 1.0:
-        raise ValueError("Measured depth must be between 0 and 1 m.")
-    return {"x": round(x, 4), "y": round(y, 4), "z": round(depth, 4), "depth_source": "measured"}
+        target = {"x": round(x, 4), "y": round(y, 4), "z": DEFAULT_OBJECT_HEIGHT_M, "depth_source": "assumed_plane_40mm"}
+    else:
+        depth = float(depth_m)
+        if not math.isfinite(depth) or not 0 < depth <= 1.0:
+            raise ValueError("Measured depth must be between 0 and 1 m.")
+        target = {"x": round(x, 4), "y": round(y, 4), "z": round(depth, 4), "depth_source": "measured"}
+    target["uncertainty"] = target_uncertainty(region, homography, target["depth_source"], calibration_error_m)
+    return target
 
 
 def estimate_detection_3d(

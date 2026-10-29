@@ -49,7 +49,7 @@ export const api = {
     req("GET", `/api/v1/jobs/${jobId}/events?after_id=${afterId}`),
   approve: (jobId) => req("POST", `/api/v1/jobs/${jobId}/approve`, {}),
   rebuildCad: (jobId) => req("POST", `/api/v1/jobs/${jobId}/rebuild-cad`, {}),
-  simulateArm: (jobId, { trainController = false, pickTargetM, placeTargetM } = {}) => req("POST", `/api/v1/jobs/${jobId}/simulate-arm`, { train_controller: trainController, ...(pickTargetM ? { pick_target_m: pickTargetM } : {}), ...(placeTargetM ? { place_target_m: placeTargetM } : {}) }),
+  simulateArm: (jobId, { trainController = false, pickTargetM, placeTargetM, perceivedTarget } = {}) => req("POST", `/api/v1/jobs/${jobId}/simulate-arm`, { train_controller: trainController, ...(pickTargetM ? { pick_target_m: pickTargetM } : {}), ...(placeTargetM ? { place_target_m: placeTargetM } : {}), ...(perceivedTarget ? { perceived_target: perceivedTarget } : {}) }),
   benchmarkArmDesigns: (jobId) => req("POST", `/api/v1/jobs/${jobId}/benchmark-arm-designs`, {}),
   armSimulationDefaults: (jobId) => req("GET", `/api/v1/jobs/${jobId}/arm-simulation-defaults`),
   proposeArmRepair: (jobId) => req("POST", `/api/v1/jobs/${jobId}/propose-arm-repair`, {}),

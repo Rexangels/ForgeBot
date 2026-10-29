@@ -246,3 +246,114 @@ class LegVisualTests(SimpleTestCase):
         updated = apply_revision_edits(design, proposal, 0.225)
         left = next(part for part in updated["components"] if part["id"] == "left_wheel")
         self.assertAlmostEqual(left["position_m"][1], 0.24)
+
+    def test_grounding_completes_suspension_symmetry(self):
+        design = {
+            "schema_version": "image-robot-concept/v1",
+            "title": "4WD Rover",
+            "robot_type": "rover",
+            "design_rationale": "fixture",
+            "estimated_dimensions_m": {"width": 0.4, "depth": 0.3, "height": 0.3},
+            "components": [
+                {"id": "base", "name": "Base", "role": "chassis", "parent_id": None, "geometry": "box", "dimensions_m": [0.4, 0.3, 0.08], "position_m": [0, 0, 0.14], "color": "#287c72"},
+                {"id": "wheel_fl", "name": "Wheel FL", "role": "front wheel", "parent_id": "base", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.05], "position_m": [0.15, 0.16, 0.06], "color": "#111827"},
+                {"id": "wheel_fr", "name": "Wheel FR", "role": "front wheel", "parent_id": "base", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.05], "position_m": [0.15, -0.16, 0.06], "color": "#111827"},
+                {"id": "wheel_rl", "name": "Wheel RL", "role": "rear wheel", "parent_id": "base", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.05], "position_m": [-0.15, 0.16, 0.06], "color": "#111827"},
+                {"id": "wheel_rr", "name": "Wheel RR", "role": "rear wheel", "parent_id": "base", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.05], "position_m": [-0.15, -0.16, 0.06], "color": "#111827"},
+                {"id": "susp_fl", "name": "Suspension strut FL", "role": "shock absorption", "parent_id": "base", "geometry": "cylinder", "dimensions_m": [0.02, 0.02, 0.07], "position_m": [0.15, 0.12, 0.11], "color": "#4a5057", "mount_intent": "vertical_strut_mount"},
+                {"id": "susp_fr", "name": "Suspension strut FR", "role": "shock absorption", "parent_id": "base", "geometry": "cylinder", "dimensions_m": [0.02, 0.02, 0.07], "position_m": [0.15, -0.12, 0.11], "color": "#4a5057", "mount_intent": "vertical_strut_mount"},
+            ],
+            "assumptions": [],
+            "manufacturing_notes": [],
+        }
+        grounded, report = ground_image_design(design, 0.3)
+        part_ids = [p["id"] for p in grounded["components"]]
+        self.assertIn("susp_rl", part_ids)
+        self.assertIn("susp_rr", part_ids)
+        susp_rl = next(p for p in grounded["components"] if p["id"] == "susp_rl")
+        wheel_rl = next(p for p in grounded["components"] if p["id"] == "wheel_rl")
+        self.assertEqual(susp_rl["position_m"][0], wheel_rl["position_m"][0])
+        self.assertEqual(susp_rl["geometry"], "cylinder")
+        self.assertEqual(susp_rl["role"], "shock absorption")
+
+    def test_grounding_aligns_body_to_wheelbase(self):
+        design = {
+            "schema_version": "image-robot-concept/v1",
+            "title": "Rover with detached body",
+            "robot_type": "rover",
+            "design_rationale": "fixture",
+            "estimated_dimensions_m": {"width": 0.4, "depth": 0.3, "height": 0.4},
+            "components": [
+                {"id": "chassis_lower", "name": "Lower Chassis", "role": "chassis", "parent_id": None, "geometry": "box", "dimensions_m": [0.35, 0.3, 0.08], "position_m": [0, 0, 0.14], "color": "#287c72"},
+                {"id": "wheel_fl", "name": "Wheel FL", "role": "front wheel", "parent_id": "chassis_lower", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.05], "position_m": [0.12, 0.16, 0.06], "color": "#111827"},
+                {"id": "wheel_fr", "name": "Wheel FR", "role": "front wheel", "parent_id": "chassis_lower", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.05], "position_m": [0.12, -0.16, 0.06], "color": "#111827"},
+                {"id": "wheel_rl", "name": "Wheel RL", "role": "rear wheel", "parent_id": "chassis_lower", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.05], "position_m": [-0.12, 0.16, 0.06], "color": "#111827"},
+                {"id": "wheel_rr", "name": "Wheel RR", "role": "rear wheel", "parent_id": "chassis_lower", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.05], "position_m": [-0.12, -0.16, 0.06], "color": "#111827"},
+                {"id": "hull_main", "name": "Main Hull", "role": "central body housing controls", "parent_id": "chassis_lower", "geometry": "box", "dimensions_m": [0.20, 0.22, 0.15], "position_m": [-0.04, 0, 0.25], "color": "#334155", "functional_category": "structure"},
+                {"id": "display_panel", "name": "Display Panel", "role": "status display", "parent_id": "hull_main", "parent_reason": "forward face", "geometry": "box", "dimensions_m": [0.02, 0.08, 0.1], "position_m": [0.07, 0, 0.26], "color": "#0f172a", "functional_category": "interface"},
+            ],
+            "assumptions": [],
+            "manufacturing_notes": [],
+        }
+        grounded, report = ground_image_design(design, 0.4)
+        hull = next(p for p in grounded["components"] if p["id"] == "hull_main")
+        disp = next(p for p in grounded["components"] if p["id"] == "display_panel")
+        # Wheelbase midpoint is 0.0; hull was at -0.04 -> centered to 0.0
+        self.assertAlmostEqual(hull["position_m"][0], 0.0)
+        # Wheelbase span is 0.24m; hull length expanded to >= 0.27m
+        self.assertGreaterEqual(hull["dimensions_m"][0], 0.27)
+        # Display panel on front face stays flush with new hull front face (0.0 + hull_length/2 + disp_thickness/2)
+        expected_disp_x = round(hull["position_m"][0] + hull["dimensions_m"][0] / 2.0 + disp["dimensions_m"][0] / 2.0, 4)
+        self.assertAlmostEqual(disp["position_m"][0], expected_disp_x)
+
+    def test_infer_locomotion_profile_forward_axis(self):
+        from core.image_design import _infer_locomotion_profile
+        design = {
+            "title": "Patrol Rover",
+            "robot_type": "rover",
+            "components": [
+                {"id": "wheel_fl", "name": "Wheel FL", "role": "front wheel", "geometry": "cylinder", "position_m": [0.15, 0.16, 0.06]},
+                {"id": "wheel_fr", "name": "Wheel FR", "role": "front wheel", "geometry": "cylinder", "position_m": [0.15, -0.16, 0.06]},
+                {"id": "wheel_rl", "name": "Wheel RL", "role": "rear wheel", "geometry": "cylinder", "position_m": [-0.15, 0.16, 0.06]},
+                {"id": "wheel_rr", "name": "Wheel RR", "role": "rear wheel", "geometry": "cylinder", "position_m": [-0.15, -0.16, 0.06]},
+            ],
+        }
+        wheels = design["components"]
+        profile = _infer_locomotion_profile(design, design["components"], wheels)
+        self.assertEqual(profile["mode"], "wheeled")
+        self.assertEqual(profile["forward_axis"], "x")
+
+    def test_infer_locomotion_profile_mobile_manipulator(self):
+        from core.image_design import _infer_locomotion_profile, simulate_image_robot
+        design = {
+            "title": "Robotic Assembly Unit AX-7",
+            "robot_type": "mobile manipulator",
+            "components": [
+                {"id": "base_chassis", "name": "Base Chassis", "role": "chassis", "geometry": "box", "dimensions_m": [0.45, 0.45, 0.08], "position_m": [0, 0, 0.08]},
+                {"id": "wheel_fl", "name": "Wheel FL", "role": "front wheel", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.04], "position_m": [0.18, 0.18, 0.06]},
+                {"id": "wheel_fr", "name": "Wheel FR", "role": "front wheel", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.04], "position_m": [0.18, -0.18, 0.06]},
+                {"id": "wheel_rl", "name": "Wheel RL", "role": "rear wheel", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.04], "position_m": [-0.18, 0.18, 0.06]},
+                {"id": "wheel_rr", "name": "Wheel RR", "role": "rear wheel", "geometry": "cylinder", "dimensions_m": [0.12, 0.12, 0.04], "position_m": [-0.18, -0.18, 0.06]},
+                {"id": "arm_turret", "name": "Turret Base", "role": "turret", "geometry": "cylinder", "dimensions_m": [0.14, 0.14, 0.04], "position_m": [0, 0, 0.14]},
+                {"id": "arm_shoulder", "name": "Shoulder Pitch Joint", "role": "shoulder", "geometry": "box", "dimensions_m": [0.08, 0.08, 0.12], "position_m": [0.04, 0, 0.22]},
+                {"id": "forearm_tube", "name": "Forearm Assembly", "role": "forearm", "geometry": "cylinder", "dimensions_m": [0.06, 0.06, 0.18], "position_m": [0.14, 0, 0.28], "orientation_rpy": [0, 1.5708, 0]},
+                {"id": "gripper_palm", "name": "End Effector Palm", "role": "gripper", "geometry": "box", "dimensions_m": [0.05, 0.05, 0.04], "position_m": [0.24, 0, 0.28]},
+                {"id": "finger_left", "name": "Precision Claw Left", "role": "claw", "geometry": "box", "dimensions_m": [0.02, 0.015, 0.06], "position_m": [0.26, 0.02, 0.26]},
+                {"id": "finger_right", "name": "Precision Claw Right", "role": "claw", "geometry": "box", "dimensions_m": [0.02, 0.015, 0.06], "position_m": [0.26, -0.02, 0.26]},
+            ],
+        }
+        wheels = [c for c in design["components"] if "wheel" in c["id"]]
+        profile = _infer_locomotion_profile(design, design["components"], wheels)
+        self.assertEqual(profile["mode"], "wheeled_mobile_manipulator")
+        self.assertTrue(profile["has_arm"])
+        self.assertEqual(profile["component_roles"]["arm_turret"], "arm_turret")
+        self.assertEqual(profile["component_roles"]["arm_shoulder"], "arm_shoulder")
+        self.assertEqual(profile["component_roles"]["forearm_tube"], "arm_forearm")
+        self.assertEqual(profile["component_roles"]["finger_left"], "gripper_finger_left")
+        self.assertEqual(profile["component_roles"]["finger_right"], "gripper_finger_right")
+
+        sim_res = simulate_image_robot(design)
+        self.assertIn("manipulation", sim_res)
+        self.assertEqual(sim_res["manipulation"]["task"], "mobile_pick_and_place")
+        self.assertTrue(sim_res["manipulation"]["ik_solved"])
+        self.assertTrue(sim_res["manipulation"]["grasp_successful"])

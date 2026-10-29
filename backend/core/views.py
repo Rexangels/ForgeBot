@@ -979,6 +979,7 @@ def simulate_tabletop_arm(request, job_id: int):
             pick_target=payload.get("pick_target_m"),
             place_target=payload.get("place_target_m"),
             train=train,
+            perceived_target=payload.get("perceived_target"),
         )
         result["spec_artifact_id"] = spec_artifact.id
     except Exception as exc:

@@ -8,12 +8,14 @@ from django.test import SimpleTestCase, TestCase
 
 from core.models import Project
 from core.perception import (
+    UNCERTAINTY_GATE_M,
     WORK_AREA_CORNERS,
     apply_homography,
     estimate_detection_3d,
     leave_one_out_error,
     map_detection,
     solve_homography,
+    target_uncertainty,
     track_objects,
     triangulate_multi_view,
 )
@@ -86,6 +88,32 @@ class HomographyTests(SimpleTestCase):
         self.assertIn("y", res)
         self.assertIn("z", res)
         self.assertEqual(res["depth_source"], "multi_view_triangulation")
+
+
+class UncertaintyTests(SimpleTestCase):
+    def test_assumed_plane_fails_gate_measured_passes_for_small_box(self):
+        homography = solve_homography(IMAGE, WORK_AREA_CORNERS)
+        small = {"x_min": 0.495, "y_min": 0.495, "x_max": 0.505, "y_max": 0.505}
+        assumed = target_uncertainty(small, homography, "assumed_plane_40mm", calibration_error_m=0.001)
+        measured = target_uncertainty(small, homography, "measured", calibration_error_m=0.001)
+        self.assertFalse(assumed["within_gate"])
+        self.assertTrue(measured["within_gate"])
+        self.assertEqual(measured["gate_m"], UNCERTAINTY_GATE_M)
+        self.assertGreater(assumed["sigma_z_m"], measured["sigma_z_m"])
+
+    def test_worse_calibration_widens_sigma(self):
+        homography = solve_homography(IMAGE, WORK_AREA_CORNERS)
+        region = {"x_min": 0.4, "y_min": 0.4, "x_max": 0.6, "y_max": 0.6}
+        good = target_uncertainty(region, homography, "measured", calibration_error_m=0.001)
+        bad = target_uncertainty(region, homography, "measured", calibration_error_m=0.05)
+        self.assertGreater(bad["sigma_m"], good["sigma_m"])
+
+    def test_map_detection_carries_uncertainty(self):
+        homography = solve_homography(IMAGE, WORK_AREA_CORNERS)
+        region = {"x_min": 0.4, "y_min": 0.4, "x_max": 0.6, "y_max": 0.6}
+        target = map_detection(region, homography, depth_m=0.05, calibration_error_m=0.002)
+        self.assertIn("uncertainty", target)
+        self.assertEqual(target["depth_source"], "measured")
 
 
 class TrackingTests(SimpleTestCase):

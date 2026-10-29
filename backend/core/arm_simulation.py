@@ -274,11 +274,50 @@ def _run_trial(spec: dict, pick: tuple[float, ...], place: tuple[float, ...], ga
     return {"goal_error_m": goal_error, "peak_tracking_error_m": tracking_error, "contacts_seen": contacts, "observed_contacts": sorted(observed_contacts), "grasp_contact_seen": grasp_contact_seen, "payload_lifted": payload_lifted, "payload_released": payload_released, "payload_resting_on_table": payload_resting_on_table, "peak_gripper_contact_force_n": peak_gripper_contact_force, "gripper_positions_m": [float(data.qpos[model.jnt_qposadr[jid]]) for jid in gripper_joint_ids], "payload_final_m": payload_pos, "unexpected_contacts": sorted(unexpected_contacts), "peak_joint_velocity_rad_s": peak_joint_velocity, "frames": frames}
 
 
-def run_arm_simulation(spec: dict, pick_target=None, place_target=None, *, train: bool = False) -> dict:
-    """Run a fixed timestep physics trial and optionally tune servo gains."""
+def _perceived_seed(perceived_target) -> tuple[tuple[float, float, float], dict]:
+    """Validate a vision-seeded pick target and its uncertainty gate."""
+    from .perception import UNCERTAINTY_GATE_M
+
+    if not isinstance(perceived_target, dict):
+        raise ArmSimulationError("Perceived target must be an object with x, y, and uncertainty_m.")
+    try:
+        x = float(perceived_target["x"])
+        y = float(perceived_target["y"])
+        z = float(perceived_target.get("z", 0.055))
+        sigma = float(perceived_target["uncertainty_m"])
+    except (KeyError, TypeError, ValueError):
+        raise ArmSimulationError("Perceived target needs numeric x, y, and uncertainty_m.") from None
+    if sigma != sigma or sigma < 0:
+        raise ArmSimulationError("Perceived target uncertainty must be a non-negative number.")
+    if sigma > UNCERTAINTY_GATE_M:
+        raise ArmSimulationError(
+            f"Perceived target uncertainty {sigma * 1000:.1f} mm exceeds the {UNCERTAINTY_GATE_M * 1000:.0f} mm gate; "
+            "recalibrate or measure depth before simulating this pick."
+        )
+    seed = {
+        "x": x, "y": y, "z": z,
+        "uncertainty_m": sigma,
+        "depth_source": str(perceived_target.get("depth_source", "unknown")),
+        "gate_m": UNCERTAINTY_GATE_M,
+    }
+    return (x, y, z), seed
+
+
+def run_arm_simulation(spec: dict, pick_target=None, place_target=None, *, train: bool = False, perceived_target=None) -> dict:
+    """Run a fixed timestep physics trial and optionally tune servo gains.
+
+    `perceived_target` seeds the pick from a calibrated vision target
+    ({x, y, z?, uncertainty_m, depth_source?}); uncertainty beyond the
+    perception gate refuses the run before any physics starts.
+    """
     errors = validate_arm_design(spec)
     if errors:
         raise ArmSimulationError("Invalid arm design: " + "; ".join(errors))
+    vision_seed = None
+    if perceived_target is not None:
+        seeded_pick, vision_seed = _perceived_seed(perceived_target)
+        if pick_target is None:
+            pick_target = seeded_pick
     if pick_target is None or place_target is None:
         default_pick, default_place = default_task_targets(spec)
     else:
@@ -351,7 +390,7 @@ def run_arm_simulation(spec: dict, pick_target=None, place_target=None, *, train
         "model": "generated MJCF from reviewed tabletop-arm specification",
         "timestep_s": 0.002,
         "deterministic": True,
-        "task": {"name": "tabletop_pick_and_place", "pick_target_m": list(pick), "place_target_m": list(place)},
+        "task": {"name": "tabletop_pick_and_place", "pick_target_m": list(pick), "place_target_m": list(place), "vision_seed": vision_seed},
         "controller": {"type": "position servos", "gains": gains, "training": training},
         "passed": passed,
         "acceptance_checks": checks,

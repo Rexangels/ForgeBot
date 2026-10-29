@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 
@@ -18,10 +19,15 @@ KICAD_3D_MODELS = {
 }
 
 
+def _keyword_in_label(keyword: str, label: str) -> bool:
+    """Match a keyword as a whole word (underscores/spaces delimit; optional plural 's')."""
+    return re.search(rf"(?<![a-z]){re.escape(keyword)}s?(?![a-z])", label) is not None
+
+
 def _find_component(components: list[dict[str, Any]], keywords: tuple[str, ...]) -> dict[str, Any] | None:
     for comp in components:
         label = f"{comp.get('id', '')} {comp.get('name', '')} {comp.get('role', '')}".lower()
-        if any(k in label for k in keywords):
+        if any(_keyword_in_label(k, label) for k in keywords):
             return comp
     return None
 
@@ -845,8 +851,18 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
     sonar_r = _find_component(components, ("sonar_right", "ultrasonic_right", "sonar_r", "rangefinder_r"))
     motor_l = _find_component(components, ("motor_left", "wheel_left", "drive_left"))
     motor_r = _find_component(components, ("motor_right", "wheel_right", "drive_right"))
+
+    def _is_plate(comp: dict[str, Any] | None) -> bool:
+        # Only thin plates are routing surfaces; a solid chassis block is not a deck.
+        if not comp:
+            return False
+        dx, dy, dz = (float(v) for v in comp.get("dimensions_m", [0, 0, 0]))
+        return dz <= max(0.012, 0.15 * min(dx, dy))
+
     top_deck = _find_component(components, ("top_deck", "upper_chassis", "upper_deck"))
     bot_deck = _find_component(components, ("bottom_deck", "lower_chassis", "base_plate", "chassis"))
+    top_deck = top_deck if _is_plate(top_deck) else None
+    bot_deck = bot_deck if _is_plate(bot_deck) else None
 
     def _pose_dims(comp: dict[str, Any] | None, default_pos: list[float], default_dims: list[float]):
         if not comp:
@@ -885,7 +901,7 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
 
         core_pt = [round(tx + tdx * 0.18, 4), round(ty, 4), round(tz + 0.01, 4)]
         spine_mid = [round(tx - tdx * 0.25, 4), round(ty, 4), round(tz, 4)]
-        return [
+        legged_cables = [
             {
                 "id": "W1_CORE_TO_HEAD_OPTICS",
                 "name": "Chest Core to Cranial Optical & Beak Bus (24 AWG)",
@@ -964,13 +980,35 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
             },
         ]
 
-    (cx, cy, cz), (cdx, cdy, cdz) = _pose_dims(ctrl, [0.0, -0.01, 0.097], [0.085, 0.056, 0.018])
-    (dx, dy, dz), (ddx, ddy, ddz) = _pose_dims(drv, [cx, cy, cz], [cdx, cdy, cdz])
-    (bx, by, bz), (bdx, bdy, bdz) = _pose_dims(bat, [0.0, -0.03, 0.051], [0.075, 0.11, 0.026])
-    (slx, sly, slz), (sldx, sldy, sldz) = _pose_dims(sonar_l, [-0.04, 0.09, 0.096], [0.045, 0.020, 0.016])
-    (srx, sry, srz), (srdx, srdy, srdz) = _pose_dims(sonar_r, [0.04, 0.09, 0.096], [0.045, 0.020, 0.016])
-    (mlx, mly, mlz), (mldx, mldy, mldz) = _pose_dims(motor_l, [-0.08, 0.02, 0.035], [0.035, 0.035, 0.025])
-    (mrx, mry, mrz), (mrdx, mrdy, mrdz) = _pose_dims(motor_r, [0.08, 0.02, 0.035], [0.035, 0.035, 0.025])
+    # Identify main structural housing & chassis envelope
+    housing = _find_component(components, ("hull_main", "hull", "cabin", "body", "chassis_lower", "chassis", "base", "trunk")) or (components[0] if components else None)
+    chassis = _find_component(components, ("chassis_lower", "chassis", "base_plate", "bottom_deck", "frame")) or housing
+
+    hx, hy, hz = [float(v) for v in housing.get("position_m", [0, 0, 0.15])] if housing else [0.0, 0.0, 0.15]
+    hdx, hdy, hdz = [float(v) for v in housing.get("dimensions_m", [0.2, 0.2, 0.1])] if housing else [0.2, 0.2, 0.1]
+    chx, chy, chz = [float(v) for v in chassis.get("position_m", [hx, hy, hz])] if chassis else [hx, hy, hz]
+    chdx, chdy, chdz = [float(v) for v in chassis.get("dimensions_m", [hdx, hdy, hdz])] if chassis else [hdx, hdy, hdz]
+
+    # Internal controller pose (enclosed inside housing/chassis if not a separate part)
+    if ctrl:
+        (cx, cy, cz), (cdx, cdy, cdz) = _pose_dims(ctrl, [hx, hy, hz], [min(0.085, hdx * 0.6), min(0.056, hdy * 0.6), 0.018])
+    else:
+        cx, cy, cz = round(hx, 4), round(hy, 4), round(hz - hdz * 0.15, 4)
+        cdx, cdy, cdz = round(min(0.085, hdx * 0.6), 4), round(min(0.056, hdy * 0.6), 4), round(min(0.018, hdz * 0.25), 4)
+
+    # Internal motor driver pose
+    if drv:
+        (dx, dy, dz), (ddx, ddy, ddz) = _pose_dims(drv, [cx, cy, cz], [cdx, cdy, cdz])
+    else:
+        dx, dy, dz = round(cx, 4), round(cy + min(0.035, cdy * 0.6), 4), round(cz, 4)
+        ddx, ddy, ddz = round(cdx * 0.8, 4), round(cdy * 0.7, 4), round(cdz, 4)
+
+    # Internal battery pack pose
+    if bat:
+        (bx, by, bz), (bdx, bdy, bdz) = _pose_dims(bat, [chx, chy, chz], [min(0.075, chdx * 0.5), min(0.11, chdy * 0.5), min(0.026, chdz * 0.3)])
+    else:
+        bx, by, bz = round(chx, 4), round(chy - chdy * 0.12, 4), round(chz - chdz * 0.20, 4)
+        bdx, bdy, bdz = round(min(0.075, chdx * 0.55), 4), round(min(0.110, chdy * 0.55), 4), round(min(0.026, chdz * 0.35), 4)
 
     ctrl_top_z = round(cz + cdz / 2.0 + 0.0025, 4)
     drv_top_z = round(dz + ddz / 2.0 + 0.0025, 4)
@@ -979,20 +1017,20 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
     top_surface_z = (
         round(float(top_deck["position_m"][2]) + float(top_deck["dimensions_m"][2]) / 2.0 + 0.0025, 4)
         if top_deck
-        else round(cz - cdz / 2.0 + 0.0025, 4)
+        else ctrl_top_z
     )
     bot_surface_z = (
         round(float(bot_deck["position_m"][2]) + float(bot_deck["dimensions_m"][2]) / 2.0 + 0.0025, 4)
         if bot_deck
         else round(bz - bdz / 2.0 + 0.0025, 4)
     )
-    # Rear cable riser trunk coordinate (tucked behind battery and controller board)
-    y_trunk = round(min(cy - cdy * 0.45, by - bdy * 0.48), 4)
-    x_bat_pos = round(cx - cdx * 0.32, 4)
-    x_bat_gnd = round(cx - cdx * 0.20, 4)
-    sonar_pin_y = round(min(sly, sry) - max(sldy, srdy) * 0.55 - 0.006, 4)
+    chassis_floor_z = round(chz - chdz / 2.0 + 0.008, 4)
+    y_spine_l = 0.012
+    y_spine_r = -0.012
+    x_bat_pos = round(cx - cdx * 0.25, 4)
+    x_bat_gnd = round(cx - cdx * 0.15, 4)
 
-    cables = [
+    cables: list[dict[str, Any]] = [
         {
             "id": "W1_BAT_POS_11V1",
             "name": "11.1V 3S Battery Positive Lead (16 AWG)",
@@ -1001,10 +1039,10 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
             "radius_m": 0.0020,
             "points_m": [
                 [round(bx - bdx * 0.25, 4), round(by, 4), bat_top_z],
-                [round(bx - bdx * 0.25, 4), y_trunk, bot_surface_z],
-                [x_bat_pos, y_trunk, bot_surface_z],
-                [x_bat_pos, y_trunk, ctrl_top_z],
-                [x_bat_pos, round(cy - cdy * 0.28, 4), ctrl_top_z],
+                [round(bx - bdx * 0.25, 4), 0.008, chassis_floor_z],
+                [x_bat_pos, 0.008, chassis_floor_z],
+                [x_bat_pos, 0.008, ctrl_top_z],
+                [x_bat_pos, round(cy - cdy * 0.20, 4), ctrl_top_z],
             ],
         },
         {
@@ -1015,10 +1053,22 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
             "radius_m": 0.0020,
             "points_m": [
                 [round(bx + bdx * 0.25, 4), round(by, 4), bat_top_z],
-                [round(bx + bdx * 0.25, 4), round(y_trunk - 0.005, 4), bot_surface_z],
-                [x_bat_gnd, round(y_trunk - 0.005, 4), bot_surface_z],
-                [x_bat_gnd, round(y_trunk - 0.005, 4), ctrl_top_z],
-                [x_bat_gnd, round(cy - cdy * 0.28, 4), ctrl_top_z],
+                [round(bx + bdx * 0.25, 4), -0.008, chassis_floor_z],
+                [x_bat_gnd, -0.008, chassis_floor_z],
+                [x_bat_gnd, -0.008, ctrl_top_z],
+                [x_bat_gnd, round(cy - cdy * 0.20, 4), ctrl_top_z],
+            ],
+        },
+        {
+            "id": "W2_AVIONICS_5V_BUCK",
+            "name": "Carrier 5V Synchronous Buck to SBC Power Header (18 AWG)",
+            "net_name": "VCC_5V_BUCK",
+            "color": "#f59e0b",
+            "radius_m": 0.0016,
+            "points_m": [
+                [round(cx + cdx * 0.28, 4), round(cy + cdy * 0.18, 4), ctrl_top_z],
+                [round(cx + cdx * 0.14, 4), round(cy + cdy * 0.18, 4), round(ctrl_top_z + 0.003, 4)],
+                [round(cx + cdx * 0.07, 4), round(cy, 4), ctrl_top_z],
             ],
         },
         {
@@ -1033,33 +1083,99 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
                 [round(dx + ddx * 0.22, 4), round(dy - ddy * 0.34, 4), drv_top_z],
             ],
         },
-        {
+    ]
+
+    wheels = [c for c in components if any(w in c.get("id", "").lower() for w in ("wheel", "tire", "drive", "track")) and c.get("geometry") == "cylinder"]
+    def _is_left_wheel(c: dict[str, Any]) -> bool:
+        y = float(c.get("position_m", [0, 0, 0])[1])
+        if abs(y) > 0.005:
+            return y > 0
+        cid = c.get("id", "").lower()
+        return any(tok in cid for tok in ("left", "_l_", "_fl", "_rl")) or cid.endswith("_l")
+
+    def _is_right_wheel(c: dict[str, Any]) -> bool:
+        y = float(c.get("position_m", [0, 0, 0])[1])
+        if abs(y) > 0.005:
+            return y < 0
+        cid = c.get("id", "").lower()
+        return any(tok in cid for tok in ("right", "_r_", "_fr", "_rr")) or cid.endswith("_r")
+
+    left_wheels = sorted([c for c in wheels if _is_left_wheel(c)], key=lambda c: -float(c.get("position_m", [0, 0, 0])[0]))
+    right_wheels = sorted([c for c in wheels if _is_right_wheel(c)], key=lambda c: -float(c.get("position_m", [0, 0, 0])[0]))
+
+    if left_wheels:
+        for idx, w in enumerate(left_wheels):
+            wx, wy, wz = [float(v) for v in w.get("position_m", [0, 0, 0])]
+            tag = "FL" if idx == 0 and len(left_wheels) > 1 else ("RL" if idx == 1 else "L")
+            cables.append({
+                "id": f"W4_MOTOR_PHASE_{tag}",
+                "name": f"Left Drive Motor {tag} Phase Harness (20 AWG)",
+                "net_name": "MOTOR_PHASE_L",
+                "color": "#22c55e",
+                "radius_m": 0.0017,
+                "points_m": [
+                    [round(dx - ddx * 0.25, 4), y_spine_l, drv_top_z],
+                    [round(dx - ddx * 0.25, 4), y_spine_l, chassis_floor_z],
+                    [round(wx, 4), y_spine_l, chassis_floor_z],
+                    [round(wx, 4), round(chy + chdy * 0.44, 4), chassis_floor_z],
+                    [round(wx, 4), round(wy * 0.85, 4), round(wz, 4)],
+                    [round(wx, 4), round(wy * 0.92, 4), round(wz, 4)],
+                ],
+            })
+    else:
+        (mlx, mly, mlz), (mldx, mldy, mldz) = _pose_dims(motor_l, [-0.08, 0.02, 0.035], [0.035, 0.035, 0.025])
+        cables.append({
             "id": "W4_MOTOR_PHASE_L",
             "name": "Left Drive Motor Phase Harness (20 AWG)",
             "net_name": "MOTOR_PHASE_L",
             "color": "#22c55e",
             "radius_m": 0.0017,
             "points_m": [
-                [round(dx - ddx * 0.28, 4), round(dy - ddy * 0.34, 4), drv_top_z],
-                [round(mlx + mldx * 0.35, 4), y_trunk, drv_top_z],
-                [round(mlx + mldx * 0.35, 4), y_trunk, round(mlz + 0.004, 4)],
-                [round(mlx + mldx * 0.35, 4), round(mly - mldy * 0.32, 4), round(mlz + 0.004, 4)],
+                [round(dx - ddx * 0.25, 4), y_spine_l, drv_top_z],
+                [round(mlx, 4), y_spine_l, chassis_floor_z],
+                [round(mlx, 4), round(mly, 4), round(mlz + 0.004, 4)],
             ],
-        },
-        {
+        })
+
+    if right_wheels:
+        for idx, w in enumerate(right_wheels):
+            wx, wy, wz = [float(v) for v in w.get("position_m", [0, 0, 0])]
+            tag = "FR" if idx == 0 and len(right_wheels) > 1 else ("RR" if idx == 1 else "R")
+            cables.append({
+                "id": f"W5_MOTOR_PHASE_{tag}",
+                "name": f"Right Drive Motor {tag} Phase Harness (20 AWG)",
+                "net_name": "MOTOR_PHASE_R",
+                "color": "#a855f7",
+                "radius_m": 0.0017,
+                "points_m": [
+                    [round(dx + ddx * 0.25, 4), y_spine_r, drv_top_z],
+                    [round(dx + ddx * 0.25, 4), y_spine_r, chassis_floor_z],
+                    [round(wx, 4), y_spine_r, chassis_floor_z],
+                    [round(wx, 4), round(chy - chdy * 0.44, 4), chassis_floor_z],
+                    [round(wx, 4), round(wy * 0.85, 4), round(wz, 4)],
+                    [round(wx, 4), round(wy * 0.92, 4), round(wz, 4)],
+                ],
+            })
+    else:
+        (mrx, mry, mrz), (mrdx, mrdy, mrdz) = _pose_dims(motor_r, [0.08, 0.02, 0.035], [0.035, 0.035, 0.025])
+        cables.append({
             "id": "W5_MOTOR_PHASE_R",
             "name": "Right Drive Motor Phase Harness (20 AWG)",
             "net_name": "MOTOR_PHASE_R",
             "color": "#a855f7",
             "radius_m": 0.0017,
             "points_m": [
-                [round(dx + ddx * 0.28, 4), round(dy - ddy * 0.34, 4), drv_top_z],
-                [round(mrx - mrdx * 0.35, 4), y_trunk, drv_top_z],
-                [round(mrx - mrdx * 0.35, 4), y_trunk, round(mrz + 0.004, 4)],
-                [round(mrx - mrdx * 0.35, 4), round(mry - mrdy * 0.32, 4), round(mrz + 0.004, 4)],
+                [round(dx + ddx * 0.25, 4), y_spine_r, drv_top_z],
+                [round(mrx, 4), y_spine_r, chassis_floor_z],
+                [round(mrx, 4), round(mry, 4), round(mrz + 0.004, 4)],
             ],
-        },
-        {
+        })
+
+    if sonar_l and sonar_r:
+        (slx, sly, slz), (sldx, sldy, sldz) = _pose_dims(sonar_l, [-0.04, 0.09, 0.096], [0.045, 0.020, 0.016])
+        (srx, sry, srz), (srdx, srdy, srdz) = _pose_dims(sonar_r, [0.04, 0.09, 0.096], [0.045, 0.020, 0.016])
+        sonar_pin_y = round(min(sly, sry) - max(sldy, srdy) * 0.55 - 0.006, 4)
+        cables.append({
             "id": "W6_SONAR_RIBBON_L",
             "name": "Front-Left Ultrasonic Sensor Ribbon (26 AWG)",
             "net_name": "GPIO24_SONAR_ECHO_L_3V3",
@@ -1071,8 +1187,8 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
                 [round(slx, 4), sonar_pin_y, top_surface_z],
                 [round(slx, 4), sonar_pin_y, round(slz - 0.006, 4)],
             ],
-        },
-        {
+        })
+        cables.append({
             "id": "W7_SONAR_RIBBON_R",
             "name": "Front-Right Ultrasonic Sensor Ribbon (26 AWG)",
             "net_name": "GPIO27_SONAR_ECHO_R_3V3",
@@ -1084,8 +1200,91 @@ def generate_3d_wiring_harness_segments(design: dict[str, Any]) -> list[dict[str
                 [round(srx, 4), sonar_pin_y, top_surface_z],
                 [round(srx, 4), sonar_pin_y, round(srz - 0.006, 4)],
             ],
-        },
-    ]
+        })
+    else:
+        # Route harnesses for visible payload sensors instead of phantom sonar points
+        cam = _find_component(components, ("head_camera", "camera", "ptz", "webcam", "head"))
+        if cam:
+            (cmx, cmy, cmz), (cmdx, cmdy, cmdz) = _pose_dims(cam, [cx, cy, hz + hdz * 0.5], [0.08, 0.08, 0.05])
+            cables.append({
+                "id": "W8_VISION_CAMERA_CSI",
+                "name": "PTZ Primary Optical / FLIR Vision Bus (MIPI CSI)",
+                "net_name": "CSI_VISION_BUS",
+                "color": "#06b6d4",
+                "radius_m": 0.0016,
+                "points_m": [
+                    [round(cx, 4), round(cy + cdy * 0.20, 4), ctrl_top_z],
+                    [round(cmx, 4), round(cmy, 4), top_surface_z],
+                    [round(cmx, 4), round(cmy, 4), round(cmz - cmdz * 0.48, 4)],
+                    [round(cmx, 4), round(cmy, 4), round(cmz, 4)],
+                ],
+            })
+
+        lidar = _find_component(components, ("lidar_puck", "lidar", "laser"))
+        if lidar:
+            (lx, ly, lz), (ldx, ldy, ldz) = _pose_dims(lidar, [cx, cy, hz + hdz * 0.7], [0.05, 0.05, 0.03])
+            cables.append({
+                "id": "W9_LIDAR_POWER_DATA",
+                "name": "360-Degree LiDAR Scanning Puck Cable (24 AWG)",
+                "net_name": "LIDAR_ETH_BUS",
+                "color": "#eab308",
+                "radius_m": 0.0016,
+                "points_m": [
+                    [round(cx + 0.015, 4), round(cy, 4), ctrl_top_z],
+                    [round(lx, 4), round(ly, 4), top_surface_z],
+                    [round(lx, 4), round(ly, 4), round(lz - ldz * 0.48, 4)],
+                    [round(lx, 4), round(ly, 4), round(lz - ldz * 0.20, 4)],
+                ],
+            })
+
+        side_l = _find_component(components, ("sidepod_l", "sensor_pod_l", "pod_l"))
+        if side_l:
+            (slx, sly, slz), (sldx, sldy, sldz) = _pose_dims(side_l, [cx, hy + hdy * 0.5, cz], [0.035, 0.035, 0.04])
+            cables.append({
+                "id": "W6_FLANK_SENSOR_L",
+                "name": "Left Flank Sensor Pod Harness (24 AWG)",
+                "net_name": "FLANK_SENSE_BUS_L",
+                "color": "#38bdf8",
+                "radius_m": 0.0015,
+                "points_m": [
+                    [round(cx - cdx * 0.20, 4), round(cy + cdy * 0.25, 4), ctrl_top_z],
+                    [round(slx, 4), round(min(sly - 0.015, hy + hdy * 0.48), 4), round(slz, 4)],
+                    [round(slx, 4), round(sly * 0.90, 4), round(slz, 4)],
+                ],
+            })
+
+        side_r = _find_component(components, ("sidepod_r", "sensor_pod_r", "pod_r"))
+        if side_r:
+            (srx, sry, srz), (srdx, srdy, srdz) = _pose_dims(side_r, [cx, hy - hdy * 0.5, cz], [0.035, 0.035, 0.04])
+            cables.append({
+                "id": "W7_FLANK_SENSOR_R",
+                "name": "Right Flank Sensor Pod Harness (24 AWG)",
+                "net_name": "FLANK_SENSE_BUS_R",
+                "color": "#38bdf8",
+                "radius_m": 0.0015,
+                "points_m": [
+                    [round(cx + cdx * 0.20, 4), round(cy + cdy * 0.25, 4), ctrl_top_z],
+                    [round(srx, 4), round(max(sry + 0.015, hy - hdy * 0.48), 4), round(srz, 4)],
+                    [round(srx, 4), round(sry * 0.90, 4), round(srz, 4)],
+                ],
+            })
+
+        disp = _find_component(components, ("display_panel", "display", "screen", "lcd", "oled"))
+        if disp:
+            (dsx, dsy, dsz), (dsdx, dsdy, dsdz) = _pose_dims(disp, [hx + hdx * 0.5, cy, cz], [0.015, 0.10, 0.12])
+            cables.append({
+                "id": "W12_DISPLAY_RIBBON",
+                "name": "Front Status Display Panel Ribbon Cable (FFC)",
+                "net_name": "DSI_DISPLAY_BUS",
+                "color": "#10b981",
+                "radius_m": 0.0015,
+                "points_m": [
+                    [round(cx + cdx * 0.25, 4), round(cy, 4), ctrl_top_z],
+                    [round(hx + hdx * 0.45, 4), round(cy, 4), round(dsz, 4)],
+                    [round(dsx - dsdx * 0.40, 4), round(dsy, 4), round(dsz, 4)],
+                ],
+            })
+
     return cables
 
 
