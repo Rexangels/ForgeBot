@@ -165,6 +165,31 @@ def generate_image_structured_json(
     return result
 
 
+def segment_image_with_sam(image_data_url: str, prompt: str) -> str:
+    """Run SAM 3.1 with a text or box prompt and return its structured output lane."""
+    response = _request_json(
+        "/responses",
+        {
+            "model": "sam-3.1",
+            "input": [{"type": "message", "role": "user", "content": [
+                {"type": "input_text", "text": prompt},
+                {"type": "input_image", "image_url": image_data_url},
+            ]}],
+            "metadata": {"include_confidence": "true"},
+        },
+    )
+    try:
+        for item in response["output"]:
+            if item.get("type") != "message":
+                continue
+            for content in item.get("content", []):
+                if content.get("type") == "output_text" and isinstance(content.get("text"), str):
+                    return content["text"]
+    except (KeyError, TypeError):
+        pass
+    raise MetaModelError("SAM returned a segmentation response that could not be read.")
+
+
 def generate_multi_image_structured_json(
     *,
     system_prompt: str,

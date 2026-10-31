@@ -22,19 +22,38 @@ def _find_freecad() -> str | None:
     configured = os.environ.get("FORGEBOT_FREECAD_EXECUTABLE", "").strip()
     if configured and Path(configured).is_file():
         return configured
-    on_path = shutil.which("freecad") or shutil.which("FreeCAD")
+    on_path = (
+        shutil.which("freecadcmd")
+        or shutil.which("FreeCADCmd")
+        or shutil.which("freecad")
+        or shutil.which("FreeCAD")
+    )
     if on_path:
+        # If GUI binary was found on PATH, check if CLI counterpart exists next to it
+        cmd_peer = Path(on_path).parent / "freecadcmd.exe"
+        if cmd_peer.is_file():
+            return str(cmd_peer)
         return on_path
 
     candidates = []
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        candidates.extend(Path(local_app_data).glob("Programs/FreeCAD*/bin/freecad.exe"))
-    for variable in ("ProgramFiles", "ProgramFiles(x86)"):
-        program_files = os.environ.get(variable)
-        if program_files:
-            candidates.extend(Path(program_files).glob("FreeCAD*/bin/freecad.exe"))
-    return str(sorted(candidates, reverse=True)[0]) if candidates else None
+    # Search for headless console CLI first
+    for name in ("freecadcmd.exe", "FreeCADCmd.exe", "freecad.exe", "FreeCAD.exe"):
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            candidates.extend(Path(local_app_data).glob(f"Programs/FreeCAD*/bin/{name}"))
+        for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+            program_files = os.environ.get(variable)
+            if program_files:
+                candidates.extend(Path(program_files).glob(f"FreeCAD*/bin/{name}"))
+
+    if not candidates:
+        return None
+
+    # Prefer headless freecadcmd.exe over GUI freecad.exe
+    cmd_candidates = [c for c in candidates if "cmd" in c.name.lower()]
+    if cmd_candidates:
+        return str(sorted(cmd_candidates, reverse=True)[0])
+    return str(sorted(candidates, reverse=True)[0])
 
 
 def run_freecad_export(job_id: int, package: dict) -> dict:

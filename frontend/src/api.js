@@ -82,11 +82,22 @@ export const api = {
     if (!res.ok) throw new Error(data?.error || `request failed (${res.status})`);
     return data;
   },
+  analyzeRobotReference: async (imageFile, brief, view = "front") => {
+    const headers = { "X-CSRFToken": getCookie("csrftoken") };
+    const form = new FormData();
+    form.append("image", imageFile);
+    form.append("brief", brief || "");
+    form.append("view", view);
+    const res = await fetch("/api/v1/vision/robot-reference/analyze", { method: "POST", headers, credentials: "include", body: form });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || `request failed (${res.status})`);
+    return data;
+  },
   saveCalibration: (projectId, { label, image_points, world_points }) =>
     req("POST", `/api/v1/projects/${projectId}/calibrations`, { label, image_points, world_points }),
   latestCalibration: (projectId) => req("GET", `/api/v1/projects/${projectId}/calibrations/latest`),
   trackDetections: (previous, current) => req("POST", "/api/v1/vision/track", { previous, current }),
-  createImageDesign: async (projectId, views, { brief, targetHeightM, constraints, localOnly }) => {
+  createImageDesign: async (projectId, views, { brief, targetHeightM, constraints, localOnly, visualObservation }) => {
     const headers = { "X-CSRFToken": getCookie("csrftoken") };
     const form = new FormData();
     views.slice(0, 3).forEach((item, index) => {
@@ -98,6 +109,7 @@ export const api = {
     form.append("target_height_m", String(targetHeightM));
     form.append("constraints", constraints);
     if (localOnly) form.append("local_only", "1");
+    if (visualObservation) form.append("visual_observation", JSON.stringify(visualObservation));
     form.append("idempotency_key", crypto.randomUUID());
     const res = await fetch(`/api/v1/projects/${projectId}/image-design`, { method: "POST", headers, credentials: "include", body: form });
     const data = await res.json().catch(() => null);

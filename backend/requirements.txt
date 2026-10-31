@@ -1,2 +1,4 @@
 Django==5.2.4
 mujoco>=3.3,<4
+Pillow>=11,<13
+meta-sam-parser==0.1.0

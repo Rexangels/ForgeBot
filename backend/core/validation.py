@@ -117,8 +117,9 @@ def validate_urdf(urdf_text: str, artifact_path: str = "rover.urdf") -> list[Fin
             )
         parents[cname] = pname
         children.add(cname)
+        jtype = joint.get("type")
         limit = joint.find("limit")
-        if joint.get("type") != "fixed" and limit is None:
+        if jtype != "fixed" and limit is None:
             findings.append(
                 Finding(
                     SEVERITY_BLOCKER,
@@ -128,17 +129,18 @@ def validate_urdf(urdf_text: str, artifact_path: str = "rover.urdf") -> list[Fin
                 )
             )
         elif limit is not None:
-            lower, upper = _num(limit.get("lower")), _num(limit.get("upper"))
             effort, vel = _num(limit.get("effort")), _num(limit.get("velocity"))
-            if lower is None or upper is None or lower >= upper:
-                findings.append(
-                    Finding(
-                        SEVERITY_BLOCKER,
-                        artifact_path,
-                        f"Joint {joint.get('name', '?')!r} has invalid limits.",
-                        "Use finite lower < upper values.",
+            if jtype != "continuous":
+                lower, upper = _num(limit.get("lower")), _num(limit.get("upper"))
+                if lower is None or upper is None or lower >= upper:
+                    findings.append(
+                        Finding(
+                            SEVERITY_BLOCKER,
+                            artifact_path,
+                            f"Joint {joint.get('name', '?')!r} has invalid limits.",
+                            "Use finite lower < upper values.",
+                        )
                     )
-                )
             for label, val in (("effort", effort), ("velocity", vel)):
                 if val is None or not math.isfinite(val) or val <= 0:
                     findings.append(

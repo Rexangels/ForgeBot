@@ -6,6 +6,7 @@ from core import views
 
 urlpatterns = [
     path("api/v1/vision/analyze", views.analyze_scene, name="analyze-scene"),
+    path("api/v1/vision/robot-reference/analyze", views.analyze_robot_reference, name="analyze-robot-reference"),
     path("api/v1/ops/summary", views.ops_summary, name="ops-summary"),
     path("api/v1/vision/track", views.track_detections, name="track-detections"),
     path("api/v1/projects/<int:project_id>/calibrations", views.save_calibration, name="save-calibration"),

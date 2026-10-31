@@ -36,8 +36,9 @@ def _design():
 
 def _observation():
     return {
-        "schema_version": "image-robot-observation/v1",
+        "schema_version": "image-robot-observation/v2",
         "scene_summary": "Small rover with deck and two wheels.",
+        "suggested_design_brief": "Design a small surveillance rover inspired by the reference image deck and wheels.",
         "observed_assemblies": [
             {"label": "deck", "appearance": "dark rectangular deck", "image_region": {"x_min": 0.2, "y_min": 0.2, "x_max": 0.8, "y_max": 0.5}, "visibility": "visible", "confidence": 0.9, "functional_hint": "chassis"},
             {"label": "wheels", "appearance": "two side wheels", "image_region": {"x_min": 0.2, "y_min": 0.5, "x_max": 0.8, "y_max": 0.8}, "visibility": "visible", "confidence": 0.8, "functional_hint": "locomotion"},
@@ -357,3 +358,43 @@ class LegVisualTests(SimpleTestCase):
         self.assertEqual(sim_res["manipulation"]["task"], "mobile_pick_and_place")
         self.assertTrue(sim_res["manipulation"]["ik_solved"])
         self.assertTrue(sim_res["manipulation"]["grasp_successful"])
+
+    def test_grounding_self_correction_and_urdf(self):
+        design = {
+            "title": "Inspection Rover",
+            "robot_type": "rover",
+            "components": [
+                {"id": "chassis_plate", "name": "Chassis Plate", "role": "chassis", "parent_id": None, "geometry": "box", "dimensions_m": [0.56, 0.10, 0.02], "position_m": [0, 0, 0.33]},
+                {"id": "motor_left", "name": "Left Motor", "role": "drive motor", "parent_id": "chassis_plate", "geometry": "box", "dimensions_m": [0.07, 0.14, 0.06], "position_m": [-0.18, -0.03, 0.29]},
+                {"id": "motor_right", "name": "Right Motor", "role": "drive motor", "parent_id": "chassis_plate", "geometry": "box", "dimensions_m": [0.07, 0.14, 0.06], "position_m": [0.18, -0.03, 0.29]},
+                {"id": "wheel_left", "name": "Wheel Left", "role": "drive wheel", "parent_id": "motor_left", "geometry": "cylinder", "dimensions_m": [0.24, 0.24, 0.09], "position_m": [-0.26, -0.03, 0.25]},
+                {"id": "wheel_right", "name": "Wheel Right", "role": "drive wheel", "parent_id": "motor_right", "geometry": "cylinder", "dimensions_m": [0.24, 0.24, 0.09], "position_m": [0.26, -0.03, 0.25]},
+                # Duplicated positive coordinates for left and right IR sensors
+                {"id": "ir_sensor_left", "name": "Left IR Sensor", "role": "proximity sensor", "parent_id": "chassis_plate", "geometry": "box", "dimensions_m": [0.05, 0.04, 0.27], "position_m": [0.30, 0.07, 0.19]},
+                {"id": "ir_sensor_right", "name": "Right IR Sensor", "role": "proximity sensor", "parent_id": "chassis_plate", "geometry": "box", "dimensions_m": [0.05, 0.04, 0.27], "position_m": [0.30, 0.07, 0.19]},
+                # Off-center caster wheel
+                {"id": "caster_stem", "name": "Caster Stem", "role": "support", "parent_id": "chassis_plate", "geometry": "box", "dimensions_m": [0.04, 0.04, 0.26], "position_m": [0.30, 0.07, 0.19]},
+                {"id": "caster_ball", "name": "Caster Ball", "role": "caster", "parent_id": "caster_stem", "geometry": "sphere", "dimensions_m": [0.04, 0.04, 0.04], "position_m": [0.25, 0.07, 0.03]},
+            ],
+        }
+
+        grounded, report = ground_image_design(design, 0.5)
+        by_id = {p["id"]: p for p in grounded["components"]}
+
+        # 1. Left IR sensor must be reflected symmetrically to negative X
+        self.assertLess(by_id["ir_sensor_left"]["position_m"][0], 0.0)
+        self.assertGreater(by_id["ir_sensor_right"]["position_m"][0], 0.0)
+        self.assertAlmostEqual(abs(by_id["ir_sensor_left"]["position_m"][0]), abs(by_id["ir_sensor_right"]["position_m"][0]), places=2)
+
+        # 2. Caster stem and ball must be centered along the wheel centerline (X = 0)
+        self.assertAlmostEqual(by_id["caster_stem"]["position_m"][0], 0.0, places=2)
+
+        # 3. Generate URDF: verify continuous joint and proper inertia
+        urdf = generate_image_robot_urdf(grounded)
+        self.assertIn('name="mount_wheel_left" type="continuous"', urdf)
+        self.assertIn('name="mount_wheel_right" type="continuous"', urdf)
+        self.assertNotIn('lower="-3.14159"', urdf)
+
+        import mujoco
+        m = mujoco.MjModel.from_xml_string(urdf)
+        self.assertIsNotNone(m)

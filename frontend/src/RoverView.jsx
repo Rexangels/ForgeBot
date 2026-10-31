@@ -550,6 +550,9 @@ function buildVisualMesh(visual, role) {
 export default function RoverView({ sim }) {
   const mountRef = useRef(null);
   const fallbackCanvasRef = useRef(null);
+  const worldSceneRef = useRef(null);
+  const worldGroundMaterialRef = useRef(null);
+  const worldGridMaterialRef = useRef(null);
 
   const isMobileManipulator = Boolean(
     sim?.robot_preview?.locomotion_profile?.has_arm ||
@@ -601,6 +604,12 @@ export default function RoverView({ sim }) {
   const [showVisionPip, setShowVisionPip] = useState(true);
   const [episodeMode, setEpisodeMode] = useState("converged"); // "converged" | "initial"
   const [webglAvailable, setWebglAvailable] = useState(true);
+  const [worldTheme, setWorldTheme] = useState(() => {
+    try { return window.localStorage.getItem("forgebot-simulation-theme") === "light" ? "light" : "dark"; }
+    catch { return "dark"; }
+  });
+  const worldThemeRef = useRef(worldTheme);
+  worldThemeRef.current = worldTheme;
 
   const commandPickAndPlace = (itemId) => {
     const item = sandboxItems.find((it) => it.id === itemId);
@@ -807,8 +816,9 @@ export default function RoverView({ sim }) {
     container.appendChild(renderer.domElement);
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#0f172a");
-    scene.fog = new THREE.FogExp2("#0f172a", 0.065);
+    scene.background = new THREE.Color(worldThemeRef.current === "dark" ? "#0f172a" : "#dce5ea");
+    scene.fog = new THREE.FogExp2(worldThemeRef.current === "dark" ? "#0f172a" : "#dce5ea", 0.065);
+    worldSceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.05, 60);
     camera.position.set(1.6, 2.5, 3.4);
@@ -837,16 +847,18 @@ export default function RoverView({ sim }) {
     // Ground plane & grid
     const groundGeo = new THREE.PlaneGeometry(14, 14);
     const groundMat = new THREE.MeshStandardMaterial({
-      color: "#131c31",
+      color: worldThemeRef.current === "dark" ? "#131c31" : "#e7ecef",
       roughness: 0.92,
       metalness: 0.05,
     });
+    worldGroundMaterialRef.current = groundMat;
     const groundMesh = new THREE.Mesh(groundGeo, groundMat);
     groundMesh.position.set(1.6, 1.2, -0.002);
     groundMesh.receiveShadow = true;
     world.add(groundMesh);
 
-    const grid = new THREE.GridHelper(12, 24, "#0ea5e9", "#1e293b");
+    const grid = new THREE.GridHelper(12, 24, worldThemeRef.current === "dark" ? "#0ea5e9" : "#0e7490", worldThemeRef.current === "dark" ? "#1e293b" : "#b8c5ce");
+    worldGridMaterialRef.current = grid.material;
     grid.rotation.x = Math.PI / 2;
     grid.position.set(1.6, 1.2, 0.0);
     world.add(grid);
@@ -1700,7 +1712,8 @@ export default function RoverView({ sim }) {
         const lookYWorld = pose.y + sinH * 1.65;
         // Map world (x, y, z_up) -> Three.js scene (x, z_up, -y)
         fpvCamera.position.set(eyeX, camHeightM, -eyeYWorld);
-        fpvCamera.lookAt(lookX, camHeightM * 0.55, -lookYWorld);
+        const cameraLookHeight = worldThemeRef.current === "light" ? camHeightM * 0.05 : camHeightM * 0.55;
+        fpvCamera.lookAt(lookX, cameraLookHeight, -lookYWorld);
         sensorCone.visible = false;
         renderer.setScissorTest(true);
         renderer.setViewport(pipX, pipY, pipW, pipH);
@@ -1728,8 +1741,22 @@ export default function RoverView({ sim }) {
       renderer.domElement.removeEventListener("pointerdown", onCanvasPointerDown);
       controls.dispose();
       renderer.dispose();
+      worldSceneRef.current = null;
+      worldGroundMaterialRef.current = null;
+      worldGridMaterialRef.current = null;
     };
   }, [sim, timeline, waypoints, obstacles, obstacleTraining, episodeMode, showWiring]);
+
+  useEffect(() => {
+    const light = worldTheme === "light";
+    const background = light ? "#dce5ea" : "#0f172a";
+    worldSceneRef.current?.background?.set(background);
+    if (worldSceneRef.current?.fog) worldSceneRef.current.fog.color.set(background);
+    worldGroundMaterialRef.current?.color?.set(light ? "#e7ecef" : "#131c31");
+    const gridMaterials = Array.isArray(worldGridMaterialRef.current) ? worldGridMaterialRef.current : [worldGridMaterialRef.current];
+    gridMaterials.forEach((material, index) => material?.color?.set(light ? (index === 0 ? "#0e7490" : "#b8c5ce") : (index === 0 ? "#0ea5e9" : "#1e293b")));
+    try { window.localStorage.setItem("forgebot-simulation-theme", light ? "light" : "dark"); } catch { /* Theme still works for this session. */ }
+  }, [worldTheme]);
 
   useEffect(() => {
     if (webglAvailable) return;
@@ -1744,6 +1771,7 @@ export default function RoverView({ sim }) {
   const locomotionMode = sim?.robot_preview?.locomotion_profile?.mode || ((sim?.drivetrain?.wheel_count ?? 2) > 0 ? "wheeled" : "bipedal_avian");
   const gaitLabel = sim?.robot_preview?.locomotion_profile?.gait_label || (locomotionMode === "wheeled" ? "Differential-Drive" : "Digitigrade Bipedal Stride + Wing Assist");
   const strideCadenceSpm = Math.round(Math.abs(currentPose.speed || 0) * 285);
+  const isLightWorld = worldTheme === "light";
 
   return (
     <figure className="viz" style={{ margin: "0.75rem 0" }}>
@@ -1755,11 +1783,11 @@ export default function RoverView({ sim }) {
           justifyContent: "space-between",
           gap: "0.5rem",
           padding: "0.55rem 0.75rem",
-          background: "#0f172a",
-          color: "#e2e8f0",
+          background: isLightWorld ? "#f1f5f7" : "#0f172a",
+          color: isLightWorld ? "#1f2937" : "#e2e8f0",
           borderTopLeftRadius: "8px",
           borderTopRightRadius: "8px",
-          borderBottom: "1px solid #1e293b",
+          borderBottom: `1px solid ${isLightWorld ? "#d4dde2" : "#1e293b"}`,
           fontSize: "0.82rem",
         }}
       >
@@ -1852,7 +1880,24 @@ export default function RoverView({ sim }) {
           </span>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem", flexWrap: "wrap" }}>
+          <button
+            type="button"
+            aria-pressed={isLightWorld}
+            title={`Switch to ${isLightWorld ? "dark" : "light"} simulation theme`}
+            onClick={() => setWorldTheme((theme) => theme === "dark" ? "light" : "dark")}
+            style={{
+              padding: "0.18rem 0.55rem",
+              fontSize: "0.75rem",
+              borderRadius: "4px",
+              border: `1px solid ${isLightWorld ? "#cbd5e1" : "#334155"}`,
+              background: isLightWorld ? "#ffffff" : "#1e293b",
+              color: isLightWorld ? "#334155" : "#f8fafc",
+              cursor: "pointer",
+            }}
+          >
+            {isLightWorld ? "☀ Light world" : "☾ Dark world"}
+          </button>
           {obstacleTraining && (
             <>
               <button
@@ -1948,7 +1993,7 @@ export default function RoverView({ sim }) {
               cursor: "pointer",
             }}
           >
-            {followCam ? "◎ Follow: ON" : "◎ Free Orbit"}
+            {followCam ? "◎ Following" : "◎ Orbit"}
           </button>
         </div>
       </div>
@@ -1960,7 +2005,7 @@ export default function RoverView({ sim }) {
             style={{
               width: "100%",
               height: "450px",
-              background: "#0f172a",
+              background: isLightWorld ? "#dce5ea" : "#0f172a",
               borderBottomLeftRadius: "8px",
               borderBottomRightRadius: "8px",
               overflow: "hidden",

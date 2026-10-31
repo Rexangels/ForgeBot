@@ -17,7 +17,7 @@ from .meta_model import MetaModelError, generate_image_structured_json, generate
 from .vision import _image_format_allowed
 
 IMAGE_DESIGN_VERSION = "image-robot-concept/v1"
-OBSERVATION_SCHEMA_VERSION = "image-robot-observation/v1"
+OBSERVATION_SCHEMA_VERSION = "image-robot-observation/v2"
 MIN_COMPONENTS = 3
 MAX_COMPONENTS = 20
 MAX_OBSERVED_ASSEMBLIES = 20
@@ -49,10 +49,11 @@ REASONED_COMPONENT_PROPERTIES = {
 OBSERVATION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["schema_version", "scene_summary", "observed_assemblies"],
+    "required": ["schema_version", "scene_summary", "suggested_design_brief", "observed_assemblies"],
     "properties": {
         "schema_version": {"type": "string", "enum": [OBSERVATION_SCHEMA_VERSION]},
         "scene_summary": {"type": "string"},
+        "suggested_design_brief": {"type": "string", "minLength": 20, "maxLength": 1200},
         "observed_assemblies": {
             "type": "array",
             "minItems": 1,
@@ -185,13 +186,19 @@ def observe_reference_components(image_data_url: str, brief: str, view_label: st
             "assemblies, their appearance, image-region boxes as normalized 0..1 fractions "
             "with origin at the top-left, occlusion state, and a short functional hint. "
             "Do not invent metric dimensions, masses, hidden internals, or materials. "
-            "Mark uncertainty with low confidence or partially_visible/inferred."
+            "Mark uncertainty with low confidence or partially_visible/inferred. Also read any "
+            "legible project title, labels, or visible task instructions in the image. Use those "
+            "clues plus the visible assemblies to suggest a concise, editable robot build brief. "
+            "Describe an apparent purpose only when the image supports it; otherwise say the "
+            "purpose is unspecified and propose a conservative prototype inspired by the visible design. "
+            "Never claim to know the user's intent, and do not invent dimensions or hidden mechanisms."
         ),
         user_prompt=(
             f"Observe this reference image (reported viewpoint: {view}) for robot concept design. "
             f"User brief: {brief.strip()}. "
             "List each distinct visible mechanical assembly (body, supports, wheels, masts, "
-            "sensor pods, frames) with appearance and region. Keep labels short."
+            "sensor pods, frames) with appearance and region. Keep labels short. Return a "
+            "suggested_design_brief written directly as a proposed task for an editable robot design."
         ),
         image_data_url=image_data_url,
         schema_name="forgebot_image_robot_observation",
@@ -208,6 +215,62 @@ def observe_reference_components(image_data_url: str, brief: str, view_label: st
             raise MetaModelError("Meta returned an invalid observation region.")
     observation["view"] = view
     return observation
+
+
+def validate_reference_observation(observation: object, view_label: str = "other") -> dict:
+    """Keep a user-reviewed visual decomposition bounded before it reaches design prompts."""
+    if not isinstance(observation, dict) or observation.get("schema_version") != OBSERVATION_SCHEMA_VERSION:
+        raise ValueError("Analyze the robot reference image with Meta before creating a design run.")
+    summary = observation.get("scene_summary")
+    suggested_brief = observation.get("suggested_design_brief")
+    assemblies = observation.get("observed_assemblies")
+    if not isinstance(summary, str) or not summary.strip() or len(summary) > 2000:
+        raise ValueError("The robot image analysis has an invalid summary. Analyze the image again.")
+    if not isinstance(suggested_brief, str) or not 20 <= len(suggested_brief.strip()) <= 1200:
+        raise ValueError("The suggested robot brief is invalid. Analyze the image again.")
+    if not isinstance(assemblies, list) or not 1 <= len(assemblies) <= MAX_OBSERVED_ASSEMBLIES:
+        raise ValueError("The robot image analysis has an invalid component list. Analyze the image again.")
+    cleaned = []
+    for item in assemblies:
+        if not isinstance(item, dict):
+            raise ValueError("The robot image analysis contains an invalid component. Analyze the image again.")
+        label = item.get("label")
+        appearance = item.get("appearance")
+        functional_hint = item.get("functional_hint")
+        visibility = item.get("visibility")
+        confidence = item.get("confidence")
+        region = item.get("image_region")
+        if not isinstance(label, str) or not label.strip() or not isinstance(appearance, str) or not isinstance(functional_hint, str):
+            raise ValueError("The robot image analysis contains incomplete component details. Analyze the image again.")
+        if visibility not in ("visible", "partially_visible", "inferred"):
+            raise ValueError("The robot image analysis contains an invalid visibility value.")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+            raise ValueError("The robot image analysis contains an invalid confidence value.")
+        if not isinstance(region, dict):
+            raise ValueError("The robot image analysis contains an invalid image region.")
+        coords = {}
+        for key in ("x_min", "y_min", "x_max", "y_max"):
+            value = region.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError("The robot image analysis contains an invalid image region.")
+            coords[key] = float(value)
+        if coords["x_min"] >= coords["x_max"] or coords["y_min"] >= coords["y_max"]:
+            raise ValueError("The robot image analysis contains an invalid image region.")
+        cleaned.append({
+            "label": label.strip()[:100],
+            "appearance": appearance.strip()[:600],
+            "functional_hint": functional_hint.strip()[:300],
+            "visibility": visibility,
+            "confidence": float(confidence),
+            "image_region": coords,
+        })
+    return {
+        "schema_version": OBSERVATION_SCHEMA_VERSION,
+        "view": _clean_view_label(view_label),
+        "scene_summary": summary.strip()[:2000],
+        "suggested_design_brief": suggested_brief.strip()[:1200],
+        "observed_assemblies": cleaned,
+    }
 
 
 def _observation_context(observations: list[dict]) -> str:
@@ -295,7 +358,7 @@ def _propose_text_only(cleaned: list[tuple[bytes, str, str]], brief: str, height
     return grounded
 
 
-def propose_image_robot_from_views(views: list[dict], brief: str, target_height_m: float, constraints: str = "", local_only: bool = False) -> dict:
+def propose_image_robot_from_views(views: list[dict], brief: str, target_height_m: float, constraints: str = "", local_only: bool = False, reviewed_observations: list[dict] | None = None) -> dict:
     """Two-stage multi-view proposal with cross-view checks and grounding.
 
     `views` holds up to three {image, content_type, view} mappings. Stage 1
@@ -315,7 +378,14 @@ def propose_image_robot_from_views(views: list[dict], brief: str, target_height_
         return _propose_text_only(cleaned, brief, height, constraints)
     data_urls = [(view, f"data:{content_type};base64,{base64.b64encode(image).decode('ascii')}") for image, content_type, view in cleaned]
     observations: list[dict] = []
-    for view, data_url in data_urls:
+    reviewed = reviewed_observations or []
+    for index, (view, data_url) in enumerate(data_urls):
+        if index < len(reviewed) and reviewed[index] is not None:
+            try:
+                observations.append(validate_reference_observation(reviewed[index], view))
+                continue
+            except ValueError:
+                pass
         try:
             observations.append(observe_reference_components(data_url, brief, view))
         except (MetaModelError, ValueError):
@@ -687,6 +757,302 @@ def _resolve_cad_assembly_collisions(design: dict) -> list[str]:
     return notes
 
 
+def _enforce_lateral_symmetry(design: dict) -> list[str]:
+    """Ensure left/right components are mirrored across the centerline rather than duplicated on one side."""
+    components = design.get("components", [])
+    by_id = {p["id"]: p for p in components}
+    notes: list[str] = []
+
+    paired_ids: set[tuple[str, str]] = set()
+    for part in components:
+        pid = part["id"].lower()
+        if "_left" in pid or pid.startswith("left_") or "_l" in pid:
+            for suffix_left, suffix_right in (("_left", "_right"), ("left_", "right_"), ("_l", "_r")):
+                if suffix_left in pid:
+                    counter_id = pid.replace(suffix_left, suffix_right, 1)
+                    if counter_id in by_id and counter_id != pid:
+                        pair_key = tuple(sorted([part["id"], by_id[counter_id]["id"]]))
+                        paired_ids.add(pair_key)
+                        break
+
+    for group in set(p.get("symmetry_group") for p in components if p.get("symmetry_group")):
+        members = [p for p in components if p.get("symmetry_group") == group]
+        if len(members) == 2:
+            pair_key = tuple(sorted([members[0]["id"], members[1]["id"]]))
+            paired_ids.add(pair_key)
+
+    for id_a, id_b in paired_ids:
+        part_a = by_id[id_a]
+        part_b = by_id[id_b]
+        if _component_is_wheel(part_a) and _component_is_wheel(part_b):
+            continue
+
+        name_a = part_a["id"].lower()
+        is_a_left = "_left" in name_a or name_a.startswith("left_") or "_l" in name_a
+        left_part = part_a if is_a_left else part_b
+        right_part = part_b if is_a_left else part_a
+
+        wheels = [p for p in components if _component_is_wheel(p)]
+        lat_axis = 0
+        if len(wheels) >= 2:
+            dx = abs(float(wheels[0]["position_m"][0]) - float(wheels[1]["position_m"][0]))
+            dy = abs(float(wheels[0]["position_m"][1]) - float(wheels[1]["position_m"][1]))
+            lat_axis = 0 if dx >= dy else 1
+
+        val_l = float(left_part["position_m"][lat_axis])
+        val_r = float(right_part["position_m"][lat_axis])
+
+        if (val_l * val_r > 0) or abs(val_l - val_r) < 0.03:
+            target_mag = max(abs(val_r), abs(val_l), 0.08)
+            right_part["position_m"][lat_axis] = round(target_mag, 4)
+            left_part["position_m"][lat_axis] = round(-target_mag, 4)
+            other_axes = [i for i in range(3) if i != lat_axis]
+            for a in other_axes:
+                avg_coord = round((float(left_part["position_m"][a]) + float(right_part["position_m"][a])) / 2.0, 4)
+                left_part["position_m"][a] = avg_coord
+                right_part["position_m"][a] = avg_coord
+            notes.append(f"Mirrored '{left_part['id']}' and '{right_part['id']}' symmetrically across lateral axis.")
+
+    return notes
+
+
+def _center_caster_wheels(design: dict) -> list[str]:
+    """Snap single casters to the vehicle centerline between the drive wheels."""
+    components = design.get("components", [])
+    wheels = [p for p in components if _component_is_wheel(p)]
+    casters = [
+        p for p in components
+        if any(w in f"{p.get('id', '')} {p.get('name', '')} {p.get('role', '')}".lower() for w in ("caster", "ball_caster", "omni_wheel"))
+    ]
+    if not casters:
+        return []
+
+    notes: list[str] = []
+    lat_axis = 0
+    centerline = 0.0
+    if len(wheels) >= 2:
+        dx = abs(float(wheels[0]["position_m"][0]) - float(wheels[1]["position_m"][0]))
+        dy = abs(float(wheels[0]["position_m"][1]) - float(wheels[1]["position_m"][1]))
+        lat_axis = 0 if dx >= dy else 1
+        centerline = sum(float(w["position_m"][lat_axis]) for w in wheels) / len(wheels)
+
+    has_l_r_casters = any("_left" in c["id"].lower() or "_right" in c["id"].lower() for c in casters)
+    if not has_l_r_casters:
+        for caster in casters:
+            current_lat = float(caster["position_m"][lat_axis])
+            if abs(current_lat - centerline) > 0.02:
+                caster["position_m"][lat_axis] = round(centerline, 4)
+                notes.append(f"Centered '{caster['id']}' at lateral coordinate {centerline:.3f} m for 3-point kinematic stability.")
+
+    return notes
+
+
+def _contain_mounted_modules_and_separate_overlaps(design: dict) -> list[str]:
+    """Prevent electronics from hanging off chassis and separate overlapping sibling components."""
+    components = design.get("components", [])
+    notes: list[str] = []
+
+    chassis = next(
+        (
+            p for p in components
+            if any(k in p.get("id", "").lower() for k in ("chassis_plate", "chassis_lower", "chassis", "base_plate", "bottom_deck", "deck"))
+            or (p.get("functional_category") == "structure" and not p.get("parent_id"))
+        ),
+        None,
+    )
+
+    if chassis:
+        ch_pos = [float(v) for v in chassis["position_m"]]
+        ch_dims = [float(v) for v in chassis["dimensions_m"]]
+        ch_min = [ch_pos[i] - ch_dims[i] / 2.0 for i in range(3)]
+        ch_max = [ch_pos[i] + ch_dims[i] / 2.0 for i in range(3)]
+
+        for part in components:
+            if part["id"] == chassis["id"] or _component_is_wheel(part):
+                continue
+            is_module = any(
+                w in f"{part.get('id', '')} {part.get('name', '')} {part.get('role', '')}".lower()
+                for w in ("battery", "motor_driver", "microcontroller", "controller", "pcb", "board", "arduino")
+            )
+            if is_module:
+                p_pos = [float(v) for v in part["position_m"]]
+                p_dims = [float(v) for v in part["dimensions_m"]]
+                adjusted = False
+                for i in (0, 1):
+                    half_d = p_dims[i] / 2.0
+                    allowed_min = ch_min[i] + half_d * 0.4
+                    allowed_max = ch_max[i] - half_d * 0.4
+                    if allowed_min < allowed_max:
+                        if p_pos[i] < allowed_min:
+                            p_pos[i] = round(allowed_min, 4)
+                            adjusted = True
+                        elif p_pos[i] > allowed_max:
+                            p_pos[i] = round(allowed_max, 4)
+                            adjusted = True
+                if adjusted:
+                    part["position_m"] = p_pos
+                    notes.append(f"Contained '{part['id']}' within '{chassis['id']}' perimeter.")
+
+    for i in range(len(components)):
+        part_a = components[i]
+        pos_a = [float(v) for v in part_a["position_m"]]
+        dims_a = [float(v) for v in part_a["dimensions_m"]]
+        for j in range(i + 1, len(components)):
+            part_b = components[j]
+            if part_a.get("parent_id") == part_b["id"] or part_b.get("parent_id") == part_a["id"]:
+                continue
+            if _component_is_wheel(part_a) or _component_is_wheel(part_b):
+                continue
+
+            pos_b = [float(v) for v in part_b["position_m"]]
+            dims_b = [float(v) for v in part_b["dimensions_m"]]
+
+            overlap = [
+                max(0.0, min(pos_a[k] + dims_a[k] / 2.0, pos_b[k] + dims_b[k] / 2.0) - max(pos_a[k] - dims_a[k] / 2.0, pos_b[k] - dims_b[k] / 2.0))
+                for k in range(3)
+            ]
+            if all(o > 0.01 for o in overlap):
+                sensor_part = part_a if "sensor" in part_a.get("id", "").lower() else (part_b if "sensor" in part_b.get("id", "").lower() else None)
+                other_part = part_b if sensor_part is part_a else part_a
+                if sensor_part and other_part:
+                    s_pos = [float(v) for v in sensor_part["position_m"]]
+                    s_dims = [float(v) for v in sensor_part["dimensions_m"]]
+                    o_pos = [float(v) for v in other_part["position_m"]]
+                    o_dims = [float(v) for v in other_part["dimensions_m"]]
+                    s_pos[1] = round(o_pos[1] + o_dims[1] / 2.0 + s_dims[1] / 2.0 + 0.015, 4)
+                    sensor_part["position_m"] = s_pos
+                    notes.append(f"Separated '{sensor_part['id']}' from '{other_part['id']}' to prevent collision.")
+
+    return notes
+
+
+def _ground_and_support_drivetrain(design: dict) -> list[str]:
+    """Physically couple drive wheels, motors, chassis, and casters.
+
+    Ensures:
+    1. Drive wheels and their corresponding motors share the exact rotation axis (X and Z alignment).
+    2. Lateral coupling: wheels mount flush to the motor output shaft along Y with zero air gap.
+    3. Motors mount flush underneath or to the chassis plate.
+    4. Drive wheels contact ground plane at Z = 0.
+    5. Caster wheels contact ground plane at Z = 0, and are structurally coupled to the chassis via a standoff.
+    """
+    components = design.get("components", [])
+    by_id = {p["id"]: p for p in components}
+    notes: list[str] = []
+
+    chassis = next(
+        (
+            p for p in components
+            if any(k in p.get("id", "").lower() for k in ("chassis_plate", "chassis_lower", "chassis", "base_plate", "bottom_deck", "deck"))
+            or (p.get("functional_category") == "structure" and not p.get("parent_id"))
+        ),
+        None,
+    )
+    if not chassis:
+        return notes
+
+    wheels = [p for p in components if _component_is_wheel(p)]
+    drive_wheels = [w for w in wheels if not any(c in w.get("id", "").lower() for c in ("caster", "omni"))]
+    if len(drive_wheels) < 2:
+        return notes
+
+    # Left (y > 0) and right (y < 0) drive wheels
+    w_left = next((w for w in drive_wheels if float(w["position_m"][1]) > 0), drive_wheels[0])
+    w_right = next((w for w in drive_wheels if float(w["position_m"][1]) < 0), drive_wheels[1])
+
+    motors = [
+        p for p in components
+        if any(k in p.get("id", "").lower() or k in p.get("role", "").lower() for k in ("motor", "actuator", "drive"))
+        and not _component_is_wheel(p)
+    ]
+    m_left = by_id.get(w_left.get("parent_id")) or next((m for m in motors if "left" in m.get("id", "").lower() or float(m["position_m"][1]) > 0), None)
+    m_right = by_id.get(w_right.get("parent_id")) or next((m for m in motors if "right" in m.get("id", "").lower() or float(m["position_m"][1]) < 0), None)
+
+    # Wheel radius
+    w_r = max(float(w_left["dimensions_m"][0]), float(w_left["dimensions_m"][1])) / 2.0
+    w_thick = min(float(w_left["dimensions_m"][i]) for i in range(3))
+
+    ch_dims = [float(v) for v in chassis["dimensions_m"]]
+    ch_half_w = ch_dims[1] / 2.0
+    ch_thick = ch_dims[2]
+
+    m_dims = [float(v) for v in m_left["dimensions_m"]] if m_left else [0.06, 0.04, 0.04]
+    m_h = m_dims[2]
+    m_w = m_dims[1]
+
+    # Ground contact: drive wheel bottom rests at z = 0
+    wheel_z = round(w_r, 4)
+    w_left["position_m"][2] = wheel_z
+    w_right["position_m"][2] = wheel_z
+
+    min_wheel_y = ch_half_w + (m_w if m_left else 0.0) + w_thick / 2.0 + 0.002
+    if abs(float(w_left["position_m"][1])) < ch_half_w:
+        w_left["position_m"][1] = round(min_wheel_y, 4)
+    if abs(float(w_right["position_m"][1])) < ch_half_w:
+        w_right["position_m"][1] = round(-min_wheel_y, 4)
+
+    # Position motors concentric with wheel axis and flush to the inner face of wheels
+    if m_left:
+        m_left["position_m"][0] = float(w_left["position_m"][0])
+        m_left["position_m"][2] = wheel_z
+        w_y = float(w_left["position_m"][1])
+        m_left["position_m"][1] = round(w_y - (w_thick / 2.0 + m_w / 2.0 + 0.002), 4)
+
+    if m_right:
+        m_right["position_m"][0] = float(w_right["position_m"][0])
+        m_right["position_m"][2] = wheel_z
+        w_y = float(w_right["position_m"][1])
+        m_right["position_m"][1] = round(w_y + (w_thick / 2.0 + m_w / 2.0 + 0.002), 4)
+
+    # Chassis placed directly on top of motors
+    new_ch_bottom = wheel_z + m_h / 2.0
+    new_ch_z = round(new_ch_bottom + ch_thick / 2.0, 4)
+    old_ch_z = float(chassis["position_m"][2])
+    delta_z = new_ch_z - old_ch_z
+
+    for p in components:
+        if p["id"] in (w_left["id"], w_right["id"], m_left["id"] if m_left else "", m_right["id"] if m_right else ""):
+            continue
+        if "caster" in p.get("id", "").lower():
+            continue
+        p["position_m"][2] = round(float(p["position_m"][2]) + delta_z, 4)
+
+    # Ground casters at z = 0 and add standoff post to deck if gap exists
+    casters = [p for p in components if "caster" in p.get("id", "").lower()]
+    for caster in casters:
+        c_r = min(float(v) for v in caster["dimensions_m"]) / 2.0
+        caster["position_m"][2] = round(c_r, 4)
+        c_top = 2.0 * c_r
+        gap = new_ch_bottom - c_top
+        if gap > 0.01:
+            bracket = next((p for p in components if "brk" in p["id"].lower() and "caster" in p["id"].lower()), None)
+            if not bracket:
+                post_id = f"post_{caster['id']}"
+                if post_id not in by_id:
+                    post = {
+                        "id": post_id,
+                        "name": f"{caster.get('name', 'Caster')} Standoff Post",
+                        "role": "structural standoff coupling caster to chassis",
+                        "functional_category": "structure",
+                        "mount_intent": "rigid_mount",
+                        "parent_id": chassis["id"],
+                        "geometry": "cylinder",
+                        "dimensions_m": [0.02, 0.02, round(gap, 4)],
+                        "position_m": [float(caster["position_m"][0]), float(caster["position_m"][1]), round(c_top + gap / 2.0, 4)],
+                        "orientation_rpy": [0.0, 0.0, 0.0],
+                        "color": "#718096",
+                        "confidence": 0.95,
+                        "visible_vs_inferred": "inferred_structural_support",
+                    }
+                    components.append(post)
+                    by_id[post_id] = post
+                    caster["parent_id"] = post_id
+                    notes.append(f"Added structural standoff '{post_id}' to mount caster flush to chassis deck.")
+
+    notes.append(f"Coupled drivetrain: aligned wheels with motor shafts and grounded chassis at Z={new_ch_z:.3f} m.")
+    return notes
+
+
 def ground_image_design(design: dict, target_height_m: float) -> tuple[dict, dict]:
     """Deterministically ground a validated design to the scale anchor.
 
@@ -736,6 +1102,14 @@ def ground_image_design(design: dict, target_height_m: float) -> tuple[dict, dic
     susp_notes = _complete_suspension_symmetry(design)
     notes.extend(susp_notes)
 
+    # Enforce bilateral lateral symmetry (e.g. left vs right sensor positions)
+    symm_notes = _enforce_lateral_symmetry(design)
+    notes.extend(symm_notes)
+
+    # Center single casters along the drive wheel centerline for kinematic stability
+    caster_notes = _center_caster_wheels(design)
+    notes.extend(caster_notes)
+
     # Center and proportion the main hull/body across the wheelbase
     align_notes = _align_body_to_wheelbase(design)
     notes.extend(align_notes)
@@ -743,6 +1117,14 @@ def ground_image_design(design: dict, target_height_m: float) -> tuple[dict, dic
     # Resolve component penetrations (tire slicing, suspension floor clipping)
     collision_notes = _resolve_cad_assembly_collisions(design)
     notes.extend(collision_notes)
+
+    # Keep mounted electronics on chassis and separate sibling part collisions
+    contain_notes = _contain_mounted_modules_and_separate_overlaps(design)
+    notes.extend(contain_notes)
+
+    # Mechanically ground and couple wheels, motors, chassis, and casters
+    drivetrain_notes = _ground_and_support_drivetrain(design)
+    notes.extend(drivetrain_notes)
 
     # Refresh components list after potential symmetry completions
     components = design.get("components", [])
@@ -1246,7 +1628,7 @@ def _component_visuals(component: dict, parent_position: list[float] | None = No
         ]
 
     # Prehensile Avian / Biped Claw Foot with Actuators (3 forward talons + 1 rear hallux talon)
-    if ("claw" in label or "talon" in label) and ("foot" in label or "toe" in label or "claw" in id_and_name):
+    if re.search(r"\b(claw|talon)s?\b", label) and ("foot" in label or "toe" in label or "claw" in id_and_name):
         visuals = [
             # Tarsal actuator manifold & gold knuckle bridge
             _visual("box", (x * 0.42, y * 0.56, z * 0.82), origin=(-x * 0.08, 0, z * 0.12), color="#1E293B"),
@@ -1262,7 +1644,7 @@ def _component_visuals(component: dict, parent_position: list[float] | None = No
         return visuals
 
     # Pneumatic Beak Actuator Assembly (tapered upper maxilla + lower mandible + actuator rings)
-    if "beak" in label or "rostrum" in label:
+    if re.search(r"\b(beak|rostrum)\b", label):
         return [
             # Base pneumatic beak housing
             _visual("cylinder", (min(y, z) * 0.82, min(y, z) * 0.82, x * 0.36), origin=(-x * 0.32, 0, 0), rpy=(0, math.pi / 2, 0), color="#1E293B"),
@@ -1280,7 +1662,7 @@ def _component_visuals(component: dict, parent_position: list[float] | None = No
     is_camera_or_sensor_head = any(
         w in label for w in ("camera", "ptz", "sensor", "lidar", "mount", "turret", "gimbal", "vision", "headlight")
     )
-    if not is_camera_or_sensor_head and ("head" in label or "skull" in label or "cranium" in label):
+    if not is_camera_or_sensor_head and re.search(r"\b(head|skull|cranium)\b", label):
         eye_d = max(0.016, min(x, y, z) * 0.34)
         visuals = [
             _visual("sphere", (x, y, z), color=color),
@@ -1295,7 +1677,7 @@ def _component_visuals(component: dict, parent_position: list[float] | None = No
         return visuals
 
     # Multi-Jointed Bionic Wing Frame & Solar-Collecting Primary Flight Feathers
-    if "wing" in label:
+    if re.search(r"\bwing[s]?\b", label):
         pos_y = float(component.get("position_m", [0, 0.08, 0])[1])
         side = 1.0 if pos_y >= 0 else -1.0
         sh_d = max(0.024, min(x, z) * 0.38)
@@ -1333,7 +1715,7 @@ def _component_visuals(component: dict, parent_position: list[float] | None = No
         return visuals
 
     # Hydraulic Tail Stabilizer Fan (actuator cylinder + 5 fanned tail feathers)
-    if "tail" in label:
+    if re.search(r"\btail[s]?\b", label):
         visuals = [
             # Hydraulic tail stabilizer actuator housing & gold piston
             _visual("cylinder", (max(0.016, y * 0.18), max(0.016, y * 0.18), x * 0.48), origin=(x * 0.24, 0, z * 0.6), rpy=(0, math.pi / 2 - 0.34, 0), color="#1E293B"),
@@ -1352,7 +1734,7 @@ def _component_visuals(component: dict, parent_position: list[float] | None = No
         return visuals
 
     # Avian / Biped Central Processing & Battery Housing Torso + Carbon Fiber Spine
-    if any(w in label for w in ("torso", "chest", "trunk")) and component["geometry"] == "box":
+    if any(re.search(rf"\b{w}\b", label) for w in ("torso", "chest", "trunk")) and component["geometry"] == "box":
         visuals = [
             # Sculpted keeled avian torso core pitched forward
             _visual("box", (x * 0.84, y * 0.84, z * 0.82), rpy=(0, 0.16, 0), color=color),
@@ -1756,6 +2138,12 @@ def generate_image_robot_urdf(design: dict) -> str:
     for item in design["components"]:
         rows.append(f'  <link name="{item["id"]}">')
         mass, (ixx, iyy, izz), _ = _component_mass_and_inertia(item)
+        if _component_is_wheel(item) and item.get("parent_id") and item["parent_id"] in by_id:
+            wheel_axle = _wheel_axis(item, by_id[item["parent_id"]]["position_m"])
+            if wheel_axle[0] == 1:
+                ixx, izz = izz, ixx
+            elif wheel_axle[1] == 1:
+                iyy, izz = izz, iyy
         rows.append(
             f'    <inertial><origin xyz="0 0 0" rpy="0 0 0"/><mass value="{mass:.4f}"/>'
             f'<inertia ixx="{ixx:.6f}" ixy="0" ixz="0" iyy="{iyy:.6f}" iyz="0" izz="{izz:.6f}"/></inertial>'
@@ -1780,9 +2168,9 @@ def generate_image_robot_urdf(design: dict) -> str:
             wheel_axle = _wheel_axis(item, parent_pose)
             axis_xyz = "0 1 0" if wheel_axle[1] == 1 else "1 0 0"
             rows.append(
-                f'  <joint name="mount_{item["id"]}" type="revolute"><parent link="{parent}"/><child link="{item["id"]}"/>'
+                f'  <joint name="mount_{item["id"]}" type="continuous"><parent link="{parent}"/><child link="{item["id"]}"/>'
                 f'<origin xyz="{px} {py} {pz}" rpy="0 0 0"/><axis xyz="{axis_xyz}"/>'
-                f'<limit lower="-3.14159" upper="3.14159" effort="2.5" velocity="12.0"/></joint>'
+                f'<limit effort="2.5" velocity="12.0"/></joint>'
             )
         elif any(w in f"{item['id']} {item['name']}".lower() for w in ("hip", "knee", "foot_claw", "beak", "tail")):
             rows.append(
@@ -2507,10 +2895,17 @@ import math
 import os
 import re
 import FreeCAD as App
-import FreeCADGui as Gui
+try:
+    import FreeCADGui as Gui
+except Exception:
+    Gui = None
 import Part
 import Mesh
-import ImportGui
+try:
+    import ImportGui
+except Exception:
+    ImportGui = None
+import Import
 import Sketcher
 
 PAYLOAD = json.loads(__PAYLOAD_LITERAL__)
@@ -2671,9 +3066,10 @@ def run_export():
             local_mesh_shapes.append(local_shape)
             world_shapes.append(shape)
             rgb = visual["color"]
-            feature.ViewObject.ShapeColor = tuple(int(rgb[index:index + 2], 16) / 255.0 for index in (1, 3, 5))
-            feature.ViewObject.LineColor = (0.12, 0.16, 0.19)
-            feature.ViewObject.Transparency = int(round((1.0 - float(visual.get("alpha", 1.0))) * 100))
+            if getattr(feature, "ViewObject", None) is not None:
+                feature.ViewObject.ShapeColor = tuple(int(rgb[index:index + 2], 16) / 255.0 for index in (1, 3, 5))
+                feature.ViewObject.LineColor = (0.12, 0.16, 0.19)
+                feature.ViewObject.Transparency = int(round((1.0 - float(visual.get("alpha", 1.0))) * 100))
             feature.addProperty("App::PropertyString", "ComponentId", "ForgeBot")
             feature.addProperty("App::PropertyInteger", "VisualIndex", "ForgeBot")
             feature.addProperty("App::PropertyString", "Primitive", "ForgeBot")
@@ -2741,8 +3137,9 @@ def run_export():
                 cable_obj = doc.addObject("Part::Feature", "Wire_" + safe_name(cable["id"]))
                 cable_obj.Label = cable.get("name", cable["id"])
                 cable_obj.Shape = cable_comp
-                cable_obj.ViewObject.ShapeColor = color_tuple
-                cable_obj.ViewObject.LineColor = (0.10, 0.14, 0.18)
+                if getattr(cable_obj, "ViewObject", None) is not None:
+                    cable_obj.ViewObject.ShapeColor = color_tuple
+                    cable_obj.ViewObject.LineColor = (0.10, 0.14, 0.18)
                 harness_group.addObject(cable_obj)
                 step_features.append(cable_obj)
         if harness_shapes:
@@ -2804,7 +3201,10 @@ def run_export():
     doc.saveAs(fcstd_path)
     if not step_features:
         raise RuntimeError("No solid geometry was generated; refusing to export an empty STEP file.")
-    ImportGui.export(step_features, step_path)
+    if ImportGui is not None:
+        ImportGui.export(step_features, step_path)
+    else:
+        Import.export(step_features, step_path)
     with open(preview_manifest_path, "w", encoding="utf-8") as manifest_file:
         json.dump(preview_manifest, manifest_file, indent=2, ensure_ascii=False)
     report = {
@@ -2831,8 +3231,9 @@ def run_export():
     with open(report_path, "w", encoding="utf-8") as report_file:
         json.dump(report, report_file, indent=2, ensure_ascii=False)
     App.Console.PrintMessage("ForgeBot FreeCAD export complete: " + step_path + "\n")
-    Gui.activeDocument().activeView().viewAxonometric()
-    Gui.activeDocument().activeView().fitAll()
+    if Gui and hasattr(Gui, "activeDocument") and Gui.activeDocument() and hasattr(Gui.activeDocument(), "activeView") and Gui.activeDocument().activeView():
+        Gui.activeDocument().activeView().viewAxonometric()
+        Gui.activeDocument().activeView().fitAll()
     return step_path
 
 run_export()

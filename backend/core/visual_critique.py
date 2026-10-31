@@ -356,9 +356,16 @@ def run_vision_in_the_loop_critique(
 
     multimodal_images: list[tuple[str, str]] = []
     for idx, view_item in enumerate(reference_views):
-        img_bytes = view_item.get("image")
-        c_type = view_item.get("content_type", "image/png")
-        v_name = view_item.get("view", f"reference_view_{idx+1}")
+        if isinstance(view_item, (tuple, list)):
+            img_bytes = view_item[0]
+            c_type = view_item[1] if len(view_item) > 1 else "image/png"
+            v_name = view_item[2] if len(view_item) > 2 else f"reference_view_{idx+1}"
+        elif isinstance(view_item, dict):
+            img_bytes = view_item.get("image")
+            c_type = view_item.get("content_type", "image/png")
+            v_name = view_item.get("view", f"reference_view_{idx+1}")
+        else:
+            continue
         if img_bytes:
             b64 = base64.b64encode(img_bytes).decode("ascii")
             multimodal_images.append((f"user_photo_{v_name}", f"data:{c_type};base64,{b64}"))

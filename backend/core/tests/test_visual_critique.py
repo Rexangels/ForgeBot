@@ -126,6 +126,18 @@ class VisualCritiqueTests(SimpleTestCase):
         self.assertEqual(images[0][0], "user_photo_front")
         self.assertEqual(images[1][0], "cad_3d_render_multiview")
 
+    @patch("core.visual_critique.generate_multi_image_structured_json")
+    def test_run_vision_in_the_loop_critique_with_tuple_views(self, mock_generate):
+        mock_generate.return_value = _mock_critique()
+        # image_design passes cleaned views as (bytes, content_type, view_label) tuples
+        ref_views = [(b"\x89PNG\r\n\x1a\n" + b"0" * 32, "image/png", "side")]
+        critique = run_vision_in_the_loop_critique(ref_views, self.design, "Patrol rover", 0.4)
+
+        self.assertEqual(critique["visual_match_score"], 0.92)
+        _, kwargs = mock_generate.call_args
+        images = kwargs["images"]
+        self.assertEqual(images[0][0], "user_photo_side")
+
     def test_apply_visual_critique_refinements(self):
         critique = _mock_critique()
         refined, notes = apply_visual_critique_refinements(self.design, critique, 0.4)

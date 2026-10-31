@@ -84,6 +84,7 @@ function ProjectsScreen({ onOpen }) {
   const [projects, setProjects] = useState(null);
   const [name, setName] = useState("");
   const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
   const load = useCallback(async () => {
     try {
       const data = await api.projects();
@@ -97,48 +98,67 @@ function ProjectsScreen({ onOpen }) {
   }, [load]);
   const create = async (e) => {
     e.preventDefault();
+    if (!name.trim() || creating) return;
     setError("");
+    setCreating(true);
     try {
-      await api.createProject(name);
+      const created = await api.createProject(name.trim());
       setName("");
-      load();
+      await load();
+      if (created?.id) onOpen({ id: created.id, name: name.trim() });
     } catch (err) {
       setError(err.message);
+    } finally {
+      setCreating(false);
     }
   };
   return (
-    <section>
-      <h2>Projects</h2>
+    <section className="projects-page">
+      <div className="projects-heading">
+        <div>
+          <p className="eyebrow">FORGEBOT WORKSPACE</p>
+          <h2>Your projects</h2>
+          <p className="muted">A project groups related robot design runs and generated files. Uploaded reference images are sent only for the action you choose and are not retained.</p>
+        </div>
+        <span className="projects-count">{projects ? `${projects.length} ${projects.length === 1 ? "project" : "projects"}` : "Loading…"}</span>
+      </div>
       {error && (
         <p className="error">
           {error} <button onClick={load}>Retry</button>
         </p>
       )}
       {projects === null && !error && <p className="muted">Loading projects…</p>}
+      <form onSubmit={create} className="project-create-card">
+        <div><p className="eyebrow">START SOMETHING NEW</p><strong>Create a project</strong><small>Use a project for one robot or a related set of experiments.</small></div>
+        <div className="project-create-controls">
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="For example, Tabletop sorter" aria-label="New project name" maxLength={120} />
+          <button type="submit" disabled={!name.trim() || creating}>{creating ? "Creating…" : "Create project"}</button>
+        </div>
+      </form>
+      <div className="project-list-heading"><div><p className="eyebrow">YOUR WORK</p><h3>Saved projects</h3></div><span className="muted">Open a project to start a run or review its history.</span></div>
       {projects !== null && projects.length === 0 && (
-        <p className="muted">No projects yet. Create one to run your first rover pipeline.</p>
+        <div className="projects-empty"><strong>No projects yet</strong><span>Create a project above to start organizing robot design runs.</span></div>
       )}
-      <ul className="rows">
+      <ul className="project-list">
         {(projects || []).map((p) => (
-          <li key={p.id} className="row">
-            <div>
-              <strong>#{p.id} — {p.name}</strong>
+          <li key={p.id} className="project-card">
+            <div className="project-card-mark" aria-hidden="true">{p.name.trim().slice(0, 1).toUpperCase()}</div>
+            <div className="project-card-copy">
+              <span className="eyebrow">PROJECT #{p.id}</span>
+              <strong>{p.name}</strong>
+              <small>Design runs, image references, and generated robot files</small>
             </div>
-            <button onClick={() => onOpen(p)}>Open jobs</button>
+            <button className="project-open-button" onClick={() => onOpen(p)}>Open project <span aria-hidden="true">→</span></button>
           </li>
         ))}
       </ul>
-      <form onSubmit={create} className="inline-form">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="New project name" aria-label="New project name" />
-        <button type="submit">Create project</button>
-      </form>
     </section>
   );
 }
 
 const WORK_AREA_CORNERS = [[-0.1, -0.3], [0.7, -0.3], [0.7, 0.3], [-0.1, 0.3]];
 
-function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
+function WorkcellVisionPanel({ projectId, projectName, onOpenJob, onUseTarget }) {
   const videoRef = useRef(null);
   const imageRef = useRef(null);
   const streamRef = useRef(null);
@@ -354,26 +374,28 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
   };
 
   return (
-    <section className="vision-panel studio-panel">
-      <div className="section-heading"><div><p className="eyebrow">MODEL VISION · HUMAN REVIEW</p><h3>Look at the work area</h3><p className="muted">Capture a still image or choose a photo. Meta describes the scene and visible objects.</p></div><span className="vision-provider">Meta · {"muse-spark-1.3"}</span></div>
+    <section className="vision-panel studio-panel workcell-vision-panel">
+      <div className="section-heading"><div><p className="eyebrow">WORKCELL VISION · PROJECT #{projectId}</p><h3>Analyze a tabletop scene</h3><p className="muted">Inspect a workcell photo and optionally map a reviewed object to the arm workspace.</p></div><span className="vision-provider">Meta · {"muse-spark-1.3"}</span></div>
       <div className="vision-grid">
         <div className="vision-capture">
+          <div className="image-workflow-heading"><span>01</span><div><strong>Inspect a workcell</strong><small>Analyze a tabletop image and optionally map a reviewed object to the arm workspace.</small></div></div>
           {cameraActive ? <video ref={videoRef} autoPlay playsInline muted className="vision-preview" /> : previewUrl ? <div className={`scene-image-frame ${calibrating ? "calibration-mode" : ""}`}><img ref={imageRef} src={previewUrl} alt="Selected workcell image" onClick={captureCalibrationPoint} />{observation?.objects?.map((object, index) => <span key={`${object.label}-${index}`} className={`vision-box ${index === selectedObject ? "selected" : ""}`} style={{ left: `${object.image_region.x_min * 100}%`, top: `${object.image_region.y_min * 100}%`, width: `${(object.image_region.x_max - object.image_region.x_min) * 100}%`, height: `${(object.image_region.y_max - object.image_region.y_min) * 100}%` }}><i>{object.label}</i></span>)}{calibrationPoints.map((point, index) => <span className="calibration-pin" key={`cal-${index}`} style={{ left: `${point[0] * 100}%`, top: `${point[1] * 100}%` }}>{index + 1}</span>)}{calibrating && <span className="calibration-hint">Click corner {calibrationPoints.length + 1} of 4</span>}</div> : <div className="vision-empty"><span>◉</span><strong>No image captured</strong><small>Use the camera or select a workcell photo.</small></div>}
           <div className="vision-actions">
             {cameraActive ? <><button className="primary-action" onClick={capture}>Capture frame</button><button className="secondary-action" onClick={stopCamera}>Close camera</button></> : <><button className="secondary-action" onClick={startCamera}>Open camera</button><label className="secondary-action vision-file">Choose image<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { selectReferenceImage(event.target.files?.[0]); event.target.value = ""; }} /></label></>}
             <button className="primary-action" disabled={!image || busy || cameraActive} onClick={analyze}>{busy ? "Analyzing image…" : "Ask Meta to inspect →"}</button>
           </div>
-          <div className="image-design-card"><div><span className="eyebrow">IMAGE-TO-ROBOT CONCEPT</span><strong>Design a robot from this reference</strong><small>Meta proposes the visible shape and part layout. ForgeBot builds separate editable part modules, an assembled CAD source, URDF, and a 3D concept for review.</small></div>
-            <div className="design-reference-picker"><label htmlFor="robot-reference-image">Robot reference views · up to 3</label><label className="design-reference-button" htmlFor="robot-reference-image">{designViews.length >= 3 ? "Three views selected" : "Add a front, side, or top view"}<input id="robot-reference-image" type="file" accept="image/jpeg,image/png,image/webp" disabled={designViews.length >= 3} onChange={(event) => { addDesignView(event.target.files?.[0]); event.target.value = ""; }} /></label>{designViews.length ? <div className="design-reference-views">{designViews.map((item, index) => <div className="design-reference-selected" key={`${item.file.name}-${index}`}><img src={item.url} alt={`Reference view ${index + 1}`} /><span><strong>{item.file.name}</strong><label>Viewpoint<select value={item.view} onChange={(event) => setDesignViewLabel(index, event.target.value)}><option value="front">Front</option><option value="side">Side</option><option value="top">Top</option><option value="other">Other</option></select></label><button className="secondary-action" type="button" onClick={() => removeDesignView(index)}>Remove</button></span></div>)}</div> : <small className="image-design-note">Add one photo, or three labeled viewpoints so widths, depths, and footprints stop being guesses. The workcell image above stays available to AI eyes separately.</small>}</div>
+          <div className="image-design-card"><div className="image-workflow-heading"><span>02</span><div><span className="eyebrow">NEW DESIGN RUN · SAVED IN PROJECT #{projectId}</span><strong>Design a robot from reference views</strong><small>Meta proposes the visible shape and part layout. ForgeBot builds editable concept files for review.</small></div></div>
+            <div className="project-run-path" aria-label={`This creates a design run inside project ${projectName}`}><span>{projectName}</span><b aria-hidden="true">→</b><span>New design run</span><small>This stays inside the current project. It does not create a separate project.</small></div>
+            <div className="design-reference-picker"><label htmlFor="robot-reference-image">Robot reference views · up to 3</label><label className="design-reference-button" htmlFor="robot-reference-image">{designViews.length >= 3 ? "Three views selected" : "Add a front, side, or top view"}<input id="robot-reference-image" type="file" accept="image/jpeg,image/png,image/webp" disabled={designViews.length >= 3} onChange={(event) => { addDesignView(event.target.files?.[0]); event.target.value = ""; }} /></label>{designViews.length ? <div className="design-reference-views">{designViews.map((item, index) => <div className="design-reference-selected" key={`${item.file.name}-${index}`}><img src={item.url} alt={`Reference view ${index + 1}`} /><span><strong>{item.file.name}</strong><label>Viewpoint<select value={item.view} onChange={(event) => setDesignViewLabel(index, event.target.value)}><option value="front">Front</option><option value="side">Side</option><option value="top">Top</option><option value="other">Other</option></select></label><button className="secondary-action" type="button" onClick={() => removeDesignView(index)}>Remove</button></span></div>)}</div> : <small className="image-design-note">Add one photo, or three labeled viewpoints so widths, depths, and footprints stop being guesses. These robot references are separate from the workcell image above.</small>}</div>
             <label>What should the robot do?<textarea rows={3} maxLength={2000} value={designBrief} onChange={(event) => setDesignBrief(event.target.value)} /></label>
             <div className="target-edit-grid"><label>Approximate robot height (m)<input type="number" min="0.05" max="3" step="0.01" value={designHeight} onChange={(event) => setDesignHeight(Number(event.target.value))} /></label></div>
             <label>Constraints (optional)<input maxLength={2000} value={designConstraints} onChange={(event) => setDesignConstraints(event.target.value)} placeholder="Budget, workspace, wheels or legs, payload…" /></label>
             <label className="image-design-note" style={{ display: "flex", gap: "6px", alignItems: "flex-start" }}><input type="checkbox" checked={designLocalOnly} onChange={(event) => setDesignLocalOnly(event.target.checked)} /> Keep reference pixels on this machine (text-only brief, less accurate proportions)</label>
-            <button className="primary-action" disabled={!designViews.length || !designBrief.trim() || designBusy || cameraActive} onClick={createImageDesign}>{designBusy ? (designLocalOnly ? "Designing from text brief…" : "Sending references to Meta…") : "Generate robot concept →"}</button>
+            <button className="primary-action" disabled={!designViews.length || !designBrief.trim() || designBusy || cameraActive} onClick={createImageDesign}>{designBusy ? (designLocalOnly ? "Creating design run…" : "Sending references to Meta…") : "Create robot design run →"}</button>
             <small className="image-design-note">{designLocalOnly ? "Local-only: reference pixels stay on this machine; the concept is designed from your brief plus local view facts. Expect rougher proportions." : "Reference views are sent to Meta only when you generate."} The model does not recover true dimensions or hidden mechanisms. No reference image is retained by ForgeBot.</small>
           </div>
           {error && <p className="error">{error}</p>}
-          <p className="vision-privacy">Images are sent to Meta only when you select <strong>Ask Meta</strong>. ForgeBot does not store the image or analysis. Use a non-sensitive workcell image.</p>
+          <p className="vision-privacy">The workcell photo is sent to Meta only when you select <strong>Ask Meta</strong>. ForgeBot does not store the image or analysis. Use a non-sensitive photo.</p>
         </div>
         <div className="vision-results">
           {!observation ? <div className="vision-empty result-empty"><strong>Scene understanding will appear here</strong><small>Includes object appearance, condition, image regions, relationships, and uncertainty.</small></div> : <>
@@ -391,8 +413,185 @@ function VisionPanel({ projectId, onOpenJob, onUseTarget }) {
   );
 }
 
+function ImageToRobotPanel({ projectId, projectName, onOpenJob }) {
+  const [image, setImage] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [view, setView] = useState("front");
+  const [observation, setObservation] = useState(null);
+  const [segmentation, setSegmentation] = useState(null);
+  const [segmentationStatus, setSegmentationStatus] = useState("pending");
+  const [segmentationError, setSegmentationError] = useState("");
+  const [segmentationReview, setSegmentationReview] = useState(null);
+  const [segmentationReviewStatus, setSegmentationReviewStatus] = useState("pending");
+  const [segmentationReviewError, setSegmentationReviewError] = useState("");
+  const [includedComponents, setIncludedComponents] = useState([]);
+  const [hoveredComponent, setHoveredComponent] = useState(null);
+  const [extraViews, setExtraViews] = useState([]);
+  const [brief, setBrief] = useState("");
+  const [suggestedBrief, setSuggestedBrief] = useState("");
+  const [briefEdited, setBriefEdited] = useState(false);
+  const [height, setHeight] = useState(0.45);
+  const [constraints, setConstraints] = useState("");
+  const [analyzing, setAnalyzing] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [error, setError] = useState("");
+  const analysisRequestRef = useRef(0);
+
+  useEffect(() => {
+    if (!image) { setPreviewUrl(""); return undefined; }
+    const url = URL.createObjectURL(image);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [image]);
+  const extraViewsRef = useRef(extraViews);
+  useEffect(() => { extraViewsRef.current = extraViews; }, [extraViews]);
+  useEffect(() => () => extraViewsRef.current.forEach((item) => URL.revokeObjectURL(item.url)), []);
+
+  const chooseImage = (file) => {
+    if (!file) return;
+    setImage(file);
+    setObservation(null);
+    setSegmentation(null);
+    setSegmentationStatus("pending");
+    setSegmentationError("");
+    setSegmentationReview(null);
+    setSegmentationReviewStatus("pending");
+    setSegmentationReviewError("");
+    setIncludedComponents([]);
+    setBrief("");
+    setSuggestedBrief("");
+    setBriefEdited(false);
+    setError("");
+    analyze(file, view, true);
+  };
+  const analyze = async (sourceImage = image, sourceView = view, forceSuggestion = false) => {
+    if (!sourceImage) return;
+    const requestId = ++analysisRequestRef.current;
+    setAnalyzing(true);
+    setError("");
+    setObservation(null);
+    setSegmentation(null);
+    setSegmentationStatus("pending");
+    setSegmentationError("");
+    setSegmentationReview(null);
+    setSegmentationReviewStatus("pending");
+    setSegmentationReviewError("");
+    setIncludedComponents([]);
+    try {
+      const result = await api.analyzeRobotReference(sourceImage, "", sourceView);
+      if (requestId !== analysisRequestRef.current) return;
+      setObservation(result.observation);
+      setSegmentation(result.segmentation || null);
+      setSegmentationStatus(result.segmentation_status || "fallback");
+      setSegmentationError(result.segmentation_error || "");
+      setSegmentationReview(result.segmentation_review || null);
+      setSegmentationReviewStatus(result.segmentation_review_status || "unavailable");
+      setSegmentationReviewError(result.segmentation_review_error || "");
+      setSuggestedBrief(result.observation.suggested_design_brief || "");
+      if ((!briefEdited || forceSuggestion) && result.observation.suggested_design_brief) {
+        setBrief(result.observation.suggested_design_brief);
+        setBriefEdited(false);
+      }
+      setIncludedComponents(result.observation.observed_assemblies.map((_, index) => index));
+    } catch (err) {
+      if (requestId !== analysisRequestRef.current) return;
+      setError(err.message);
+      setObservation(null);
+      setSegmentation(null);
+      setSegmentationStatus("fallback");
+      setSegmentationError("");
+      setIncludedComponents([]);
+    } finally {
+      if (requestId === analysisRequestRef.current) setAnalyzing(false);
+    }
+  };
+  const addView = (file) => {
+    if (!file || extraViews.length >= 2) return;
+    const defaults = ["side", "top"];
+    setExtraViews((current) => [...current, { file, url: URL.createObjectURL(file), view: defaults[current.length] || "other" }]);
+    setError("");
+  };
+  const removeView = (index) => setExtraViews((current) => {
+    const removed = current[index];
+    if (removed) URL.revokeObjectURL(removed.url);
+    return current.filter((_, itemIndex) => itemIndex !== index);
+  });
+  const createDesign = async () => {
+    if (!image || !observation || includedComponents.length === 0 || !brief.trim()) return;
+    setCreating(true);
+    setError("");
+    try {
+      const reviewedObservation = {
+        ...observation,
+        observed_assemblies: observation.observed_assemblies.filter((_, index) => includedComponents.includes(index)),
+      };
+      const result = await api.createImageDesign(projectId, [{ file: image, view }, ...extraViews], {
+        brief, targetHeightM: height, constraints, visualObservation: reviewedObservation,
+      });
+      onOpenJob(result.id);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setCreating(false);
+    }
+  };
+  const toggleComponent = (index) => setIncludedComponents((current) => current.includes(index) ? current.filter((item) => item !== index) : [...current, index]);
+
+  return (
+    <section className="robot-design-page studio-panel">
+      <div className="section-heading robot-design-heading">
+        <div><p className="eyebrow">IMAGE-TO-ROBOT · PROJECT #{projectId}</p><h3>Build a robot concept from an image</h3><p className="muted">Muse Spark describes the assemblies, SAM 3.1 segments them, and Muse checks the numbered masks against the part labels.</p></div>
+        <span className="vision-provider">Muse Spark + SAM 3.1</span>
+      </div>
+
+      <div className="robot-analysis-workspace">
+        <section className="robot-reference-panel">
+          <div className="image-workflow-heading"><span>01</span><div><strong>Robot reference</strong><small>Adding an image automatically starts Meta analysis. It becomes the first design view.</small></div></div>
+          {previewUrl ? <div className="robot-reference-frame"><div className="robot-reference-image-stage" onMouseLeave={() => setHoveredComponent(null)}><img src={previewUrl} alt="Robot reference selected for concept design" />{observation?.observed_assemblies.map((part, index) => {
+            const region = part.image_region;
+            const mask = segmentation?.[index];
+            return <React.Fragment key={`${part.label}-${index}`}>
+              {mask?.mask_png && <img className={`robot-mask-overlay ${includedComponents.includes(index) ? "included" : "excluded"}`} src={mask.mask_png} alt="" style={{ left: `${mask.image_region.x_min * 100}%`, top: `${mask.image_region.y_min * 100}%`, width: `${(mask.image_region.x_max - mask.image_region.x_min) * 100}%`, height: `${(mask.image_region.y_max - mask.image_region.y_min) * 100}%` }} />}
+              {!mask?.mask_png && <span className={`robot-region-box ${includedComponents.includes(index) ? "included" : "excluded"}`} style={{ left: `${region.x_min * 100}%`, top: `${region.y_min * 100}%`, width: `${(region.x_max - region.x_min) * 100}%`, height: `${(region.y_max - region.y_min) * 100}%` }}><i>{index + 1} · {part.label}</i></span>}
+              <button className={`robot-region-hotspot ${hoveredComponent === index ? "active" : ""}`} type="button" aria-label={`${part.label}. ${part.appearance}. Likely role: ${part.functional_hint}`} title={`Inspect ${part.label}`} style={{ left: `${region.x_min * 100}%`, top: `${region.y_min * 100}%`, width: `${(region.x_max - region.x_min) * 100}%`, height: `${(region.y_max - region.y_min) * 100}%` }} onMouseEnter={() => setHoveredComponent(index)} onFocus={() => setHoveredComponent(index)} onBlur={() => setHoveredComponent(null)} />
+            </React.Fragment>;
+          })}{hoveredComponent != null && observation?.observed_assemblies[hoveredComponent] && <div className="robot-hover-tooltip" role="status"><strong>{observation.observed_assemblies[hoveredComponent].label}</strong><span>{observation.observed_assemblies[hoveredComponent].appearance}</span><small><b>Likely role:</b> {observation.observed_assemblies[hoveredComponent].functional_hint}</small><small>{segmentation?.[hoveredComponent]?.mask_png ? `SAM mask · ${Math.round((segmentation[hoveredComponent].confidence ?? observation.observed_assemblies[hoveredComponent].confidence) * 100)}% confidence` : `Approximate region · ${Math.round(observation.observed_assemblies[hoveredComponent].confidence * 100)}% Muse confidence`}</small>{(() => { const check = segmentationReview?.components?.find((item) => item.id === hoveredComponent + 1); return check ? <small className={`sam-review-text ${check.status}`}><b>Muse mask check · {check.status}:</b> {check.reason}</small> : null; })()}</div>}</div></div> : <div className="robot-reference-empty"><strong>Add a robot image</strong><span>Muse Spark identifies assemblies; SAM 3.1 traces their visible pixel regions.</span></div>}
+          <label className="robot-image-picker">{image ? "Choose a different image" : "Choose robot image"}<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => { chooseImage(event.target.files?.[0]); event.target.value = ""; }} /></label>
+          <label>Viewpoint<select value={view} disabled={!image || analyzing || creating} onChange={(event) => { const nextView = event.target.value; setView(nextView); analyze(image, nextView); }}><option value="front">Front</option><option value="side">Side</option><option value="top">Top</option><option value="other">Other</option></select></label>
+          <small className="image-design-note">The image is sent to Meta for analysis as soon as you select it. ForgeBot does not retain the image or analysis.</small>
+        </section>
+
+        <section className="robot-analysis-panel" aria-live="polite">
+          <div className="image-workflow-heading"><span>02</span><div><strong>Meta component analysis</strong><small>Muse describes each part, SAM 3.1 segments the pixels, and Muse cross-checks each numbered mask. Hover or tap an image region or part row for details.</small></div></div>
+          {analyzing ? <div className="robot-analysis-empty" role="status"><strong>Meta is inspecting the reference…</strong><span>Identifying visible assemblies, image regions, and likely functions. Design controls will appear after the review is ready.</span></div> : error && !observation ? <div className="robot-analysis-empty"><strong>Image analysis could not be completed</strong><span>{error}</span><button className="secondary-action" type="button" onClick={() => analyze()}>Retry analysis</button></div> : !observation ? <div className="robot-analysis-empty"><strong>{image ? "Analysis will appear here" : "Add a robot image to begin"}</strong><span>{image ? "Meta’s assembly summary and region overlays will appear here." : "Choose a reference image to analyze its visible assemblies before design."}</span></div> : <>
+            <div className="robot-observation-summary"><span className="eyebrow">SCENE SUMMARY</span><p>{observation.scene_summary}</p><small>{segmentationStatus === "ready" ? `Colored overlays show SAM 3.1 pixel masks; dashed boxes mark parts SAM did not segment. ${segmentationReviewStatus === "ready" ? "Muse has cross-checked the numbered masks against the part labels." : segmentationReviewError || "Masks are ready for visual review."} Masks describe visible 2D pixels only.` : segmentationStatus === "no_masks" ? "SAM 3.1 found no segmentable regions for these prompts; approximate component boxes are shown instead." : `SAM 3.1 masks are unavailable; approximate boxes are shown. ${segmentationError || "Hidden geometry and exact dimensions are not inferred."}`}</small></div>
+            <div className="robot-component-list-heading"><strong>Visible assemblies</strong><span>{includedComponents.length} of {observation.observed_assemblies.length} selected for design</span></div>
+            <div className="robot-component-list">{observation.observed_assemblies.map((part, index) => <label key={`${part.label}-${index}`} onMouseEnter={() => setHoveredComponent(index)} onMouseLeave={() => setHoveredComponent(null)} onFocus={() => setHoveredComponent(index)} onBlur={() => setHoveredComponent(null)} className={`robot-component-card ${includedComponents.includes(index) ? "selected" : ""} ${hoveredComponent === index ? "hovered" : ""}`}>
+              <input type="checkbox" checked={includedComponents.includes(index)} onChange={() => toggleComponent(index)} />
+              <span className="robot-component-number">{String(index + 1).padStart(2, "0")}</span>
+              <span className="robot-component-copy"><strong>{part.label}</strong><small>{part.appearance}</small><small><b>Likely role:</b> {part.functional_hint}</small><em>{part.visibility.replaceAll("_", " ")} · {Math.round(part.confidence * 100)}% Muse confidence{segmentation?.[index]?.confidence != null ? ` · ${Math.round(segmentation[index].confidence * 100)}% SAM mask` : ""}</em>{(() => { const check = segmentationReview?.components?.find((item) => item.id === index + 1); return check ? <small className={`sam-review-text ${check.status}`}><b>Muse mask check · {check.status}</b> — {check.reason}</small> : segmentationReviewError && segmentation?.[index]?.mask_png ? <small className="sam-review-text unavailable">Muse mask check unavailable; review the overlay visually.</small> : null; })()}</span>
+            </label>)}</div>
+          </>}
+        </section>
+      </div>
+
+      {observation && <section className="robot-design-controls">
+        <div className="image-workflow-heading"><span>03</span><div><strong>Build from the reviewed image</strong><small>This creates a design run in {projectName}; the selected analysis and same reference go to Meta.</small></div></div>
+        <label className="suggested-brief-field"><span className="suggested-brief-label"><span>Suggested build brief <small>AI-generated from image clues · edit freely</small></span>{briefEdited && suggestedBrief && <button className="link" type="button" onClick={() => { setBrief(suggestedBrief); setBriefEdited(false); }}>Restore image suggestion</button>}</span><textarea rows={3} maxLength={2000} value={brief} onChange={(event) => { setBrief(event.target.value); setBriefEdited(true); }} placeholder="Meta will suggest a task after analyzing the image." /><small className="image-design-note">This is a best guess from visible labels and parts. Confirm or change the robot’s actual purpose before creating the run.</small></label>
+        <div className="robot-design-fields"><label>Approximate robot height (m)<input type="number" min="0.05" max="3" step="0.01" value={height} onChange={(event) => setHeight(Number(event.target.value))} /></label><label>Constraints (optional)<input maxLength={2000} value={constraints} onChange={(event) => setConstraints(event.target.value)} placeholder="Budget, workspace, wheels or legs, payload…" /></label></div>
+        <details className="extra-views-details"><summary>Add another viewpoint (optional)</summary><p className="image-design-note">Extra side or top views help Meta keep part proportions consistent across the concept.</p><label className="design-reference-button">Add a second or third view<input type="file" accept="image/jpeg,image/png,image/webp" disabled={extraViews.length >= 2} onChange={(event) => { addView(event.target.files?.[0]); event.target.value = ""; }} /></label>{extraViews.map((item, index) => <div className="design-reference-selected" key={`${item.file.name}-${index}`}><img src={item.url} alt={`Additional robot reference ${index + 1}`} /><span><strong>{item.file.name}</strong><label>Viewpoint<select value={item.view} onChange={(event) => setExtraViews((current) => current.map((entry, i) => i === index ? { ...entry, view: event.target.value } : entry))}><option value="side">Side</option><option value="top">Top</option><option value="front">Front</option><option value="other">Other</option></select></label><button className="link" type="button" onClick={() => removeView(index)}>Remove</button></span></div>)}</details>
+        {error && <p className="error">{error}</p>}
+        <button className="primary-action" type="button" disabled={!image || !includedComponents.length || !brief.trim() || creating || analyzing} onClick={createDesign}>{creating ? "Creating design run…" : "Create robot design run →"}</button>
+        <p className="image-design-note">The same reference and reviewed component analysis are sent to Meta for the design run. The result uses estimated primitive geometry; it does not recover CAD, hidden mechanisms, or manufacturing dimensions.</p>
+      </section>}
+      {!observation && <section className="robot-design-locked"><span className="step-number">03</span><div><strong>Design controls unlock after image review</strong><small>Add a robot image and review Meta’s visible assembly analysis before defining the task and starting a design run.</small></div></section>}
+    </section>
+  );
+}
+
 function ProjectScreen({ project, onBack, onOpenJob, onUseVisionTarget }) {
   const [jobs, setJobs] = useState(null);
+  const [activeProjectTab, setActiveProjectTab] = useState("mission");
   const [task, setTask] = useState("Pick up small objects and sort them into bins on a tabletop");
   const [units, setUnits] = useState("si");
   const [environment, setEnvironment] = useState("indoor tabletop, 0.8 x 0.6 m work area");
@@ -410,6 +609,16 @@ function ProjectScreen({ project, onBack, onOpenJob, onUseVisionTarget }) {
   useEffect(() => {
     load();
   }, [load]);
+  const handleProjectTabKeyDown = (event) => {
+    const tabs = ["mission", "image", "history"];
+    const index = tabs.indexOf(activeProjectTab);
+    const nextIndex = event.key === "ArrowRight" ? (index + 1) % tabs.length : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : -1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    const nextTab = tabs[nextIndex];
+    setActiveProjectTab(nextTab);
+    document.getElementById(`project-tab-${nextTab}`)?.focus();
+  };
   const run = async (e) => {
     e.preventDefault();
     setError("");
@@ -433,14 +642,23 @@ function ProjectScreen({ project, onBack, onOpenJob, onUseVisionTarget }) {
         <div>
           <p className="eyebrow">ROBOTICS WORKSPACE · PROJECT #{project.id}</p>
           <h2>{project.name}</h2>
-          <p className="muted">Shape the mission, inspect the robot, then build and review its software.</p>
+          <p className="muted">Start a mission-based robot run, build a concept from an image with Meta, or open this project’s history.</p>
         </div>
-          <span className="robot-class">{robotClass === "tabletop_robot_arm" ? "AI design · tabletop arm" : robotClass === "research_humanoid" ? "AI design · humanoid concept" : "Prototype · rover"}</span>
+          <span className="robot-class">{activeProjectTab === "image" ? "Image-guided robot concept" : activeProjectTab === "history" ? "Project history" : robotClass === "tabletop_robot_arm" ? "AI design · tabletop arm" : robotClass === "research_humanoid" ? "AI design · humanoid concept" : "Prototype · rover"}</span>
       </div>
 
+      <nav className="project-tabs" role="tablist" aria-label="Project workspace" onKeyDown={handleProjectTabKeyDown}>
+        {[
+          ["mission", "Mission run", "Start a robot design"],
+          ["image", "Image-to-robot", "Analyze parts and build a robot"],
+          ["history", "Project history", `${jobs?.length || 0} design runs`],
+        ].map(([tab, label, detail]) => <button key={tab} type="button" role="tab" tabIndex={activeProjectTab === tab ? 0 : -1} id={`project-tab-${tab}`} aria-selected={activeProjectTab === tab} aria-controls={`project-panel-${tab}`} className={`project-tab ${activeProjectTab === tab ? "active" : ""}`} onClick={() => setActiveProjectTab(tab)}><strong>{label}</strong><small>{detail}</small></button>)}
+      </nav>
+
+      <section className="project-tab-panel" role="tabpanel" id="project-panel-mission" aria-labelledby="project-tab-mission" hidden={activeProjectTab !== "mission"}>
       <div className="studio-grid project-studio">
         <aside className="studio-panel mission-panel">
-          <div className="panel-heading"><span className="step-number">01</span><div><h3>Mission brief</h3><p className="muted">Describe what the robot should do.</p></div></div>
+          <div className="panel-heading"><span className="step-number">01</span><div><h3>New design run</h3><p className="muted">Start from a mission brief.</p></div></div>
           <form onSubmit={run}>
             <label>Robot platform<select value={robotClass} onChange={(e) => {
               const nextClass = e.target.value;
@@ -454,7 +672,7 @@ function ProjectScreen({ project, onBack, onOpenJob, onUseVisionTarget }) {
             <label>Operating environment<input value={environment} onChange={(e) => setEnvironment(e.target.value)} /></label>
             <label>Units<select value={units} onChange={(e) => setUnits(e.target.value)}><option value="si">SI units</option><option value="metric">Metric</option><option value="imperial">Imperial</option></select></label>
             {error && <p className="error">{error}</p>}
-            <button className="primary-action" type="submit" disabled={running}>{running ? "Preparing workspace…" : "Start design run"}<span aria-hidden="true">→</span></button>
+            <button className="primary-action" type="submit" disabled={running}>{running ? "Creating design run…" : "Create mission-based run"}<span aria-hidden="true">→</span></button>
           </form>
           <p className="panel-footnote">{robotClass === "research_humanoid" ? "Meta proposes an original humanoid concept. ForgeBot builds and validates a kinematic URDF; physics, balance, and manufacturing design remain future milestones." : "Arm proposals come from Meta Model API, then pass local checks. They are conceptual designs, not manufacturing or safety approvals."}</p>
         </aside>
@@ -475,13 +693,16 @@ function ProjectScreen({ project, onBack, onOpenJob, onUseVisionTarget }) {
           <div className="agent-status"><span className="status-light" /> Ready when you are</div>
         </aside>
       </div>
+      </section>
 
-      <VisionPanel projectId={project.id} onOpenJob={onOpenJob} onUseTarget={onUseVisionTarget} />
+      <section className="project-tab-panel" role="tabpanel" id="project-panel-image" aria-labelledby="project-tab-image" hidden={activeProjectTab !== "image"}>
+        <ImageToRobotPanel projectId={project.id} projectName={project.name} onOpenJob={onOpenJob} />
+      </section>
 
-      <section className="runs-section">
+      <section className="project-tab-panel runs-section" role="tabpanel" id="project-panel-history" aria-labelledby="project-tab-history" hidden={activeProjectTab !== "history"}>
         <div className="section-heading"><div><p className="eyebrow">PROJECT HISTORY</p><h3>Recent design runs</h3></div><span className="muted">{jobs?.length || 0} runs</span></div>
         {jobs === null && <p className="muted">Loading runs…</p>}
-        {jobs !== null && jobs.length === 0 && <p className="empty-state">No design runs yet. Start with the mission brief above.</p>}
+        {jobs !== null && jobs.length === 0 && <p className="empty-state">No design runs yet. Create one from the mission brief or robot reference views above.</p>}
         <ul className="rows run-rows">{(jobs || []).map((j) => <li key={j.id} className="row"><div className="run-title"><span className="run-icon">◈</span><div><strong>Design run #{j.id}</strong><small>Mission → design → code → validation</small></div></div><StateChip state={j.state} /><button className="secondary-action" onClick={() => onOpenJob(j.id)}>Open workspace <span aria-hidden="true">→</span></button></li>)}</ul>
       </section>
     </section>

@@ -256,9 +256,103 @@ def analyze_scene(request):
 
 
 @require_POST
+def analyze_robot_reference(request):
+    """Inspect a robot reference image as assembly regions for a later design run."""
+    import base64
+
+    from .image_design import _clean_view_label, observe_reference_components, validate_reference_observation
+    from .meta_model import MetaModelError
+    from .vision import _image_format_allowed
+
+    denied = _forbidden(request)
+    if denied:
+        return denied
+    image_file = request.FILES.get("image")
+    if image_file is None:
+        return JsonResponse({"error": "Choose a robot reference image first."}, status=400)
+    if not upload_size_ok(image_file.size):
+        return JsonResponse({"error": f"Image must be no larger than {settings.FORGEBOT_MAX_UPLOAD_MB:g} MB."}, status=413)
+    image = image_file.read()
+    content_type = image_file.content_type or ""
+    if not _image_format_allowed(content_type, image):
+        return JsonResponse({"error": "Upload a valid JPEG, PNG, or WebP robot reference image."}, status=400)
+    brief = (request.POST.get("brief") or "").strip()
+    if len(brief) > 2000:
+        return JsonResponse({"error": "Keep the robot task brief under 2,000 characters."}, status=400)
+    view = _clean_view_label(request.POST.get("view", "front"))
+    data_url = f"data:{content_type};base64,{base64.b64encode(image).decode('ascii')}"
+    try:
+        observation = observe_reference_components(data_url, brief or "Propose a robot concept based on the visible mechanical assemblies.", view)
+        observation = validate_reference_observation(observation, view)
+    except ValueError as exc:
+        return JsonResponse({"error": str(exc)}, status=422)
+    except MetaModelError as exc:
+        return JsonResponse({"error": str(exc)}, status=502)
+    segmentation = None
+    segmentation_status = "fallback"
+    segmentation_error = ""
+    segmentation_review = None
+    segmentation_review_status = "unavailable"
+    segmentation_review_error = ""
+    try:
+        from .sam_segmentation import (
+            build_numbered_overlay_data_url,
+            review_sam_masks_with_muse,
+            segment_observed_assemblies,
+        )
+
+        segmentation = segment_observed_assemblies(image, content_type, observation)
+        for index, mask in enumerate(segmentation):
+            if mask:
+                observation["observed_assemblies"][index]["image_region"] = mask["image_region"]
+        segmentation_status = "ready" if any(segmentation) else "no_masks"
+        if any(segmentation):
+            try:
+                numbered_overlay = build_numbered_overlay_data_url(image, content_type, segmentation)
+                segmentation_review = review_sam_masks_with_muse(data_url, numbered_overlay, observation, segmentation)
+                segmentation_review_status = "ready"
+            except Exception as exc:
+                import logging
+
+                logging.getLogger(__name__).warning("SAM mask review unavailable (%s)", type(exc).__name__)
+                segmentation_review_error = f"Muse could not verify the SAM masks ({type(exc).__name__}); the masks are still available for visual review."
+    except MetaModelError as exc:
+        segmentation_error = str(exc)
+        segmentation = None
+    except ModuleNotFoundError as exc:
+        import sys
+
+        missing = exc.name or "unknown module"
+        segmentation_error = (
+            f"Backend Python {sys.executable} cannot import '{missing}'. "
+            "Install backend/requirements.txt into this Python environment, then restart Django."
+        )
+        segmentation = None
+    except Exception as exc:
+        # Keep the Muse scene analysis useful if SAM or its parser is unavailable.
+        import logging
+
+        logging.getLogger(__name__).warning("SAM segmentation fell back (%s)", type(exc).__name__)
+        segmentation_error = f"SAM could not return usable masks ({type(exc).__name__}). Check the backend log and SAM dependencies."
+        segmentation = None
+    return JsonResponse({
+        "provider": settings.MODEL_API_PROVIDER,
+        "model": settings.MODEL_API_NAME,
+        "segmentation_model": "sam-3.1",
+        "segmentation_status": segmentation_status,
+        "segmentation_error": segmentation_error,
+        "segmentation": segmentation,
+        "segmentation_review": segmentation_review,
+        "segmentation_review_status": segmentation_review_status,
+        "segmentation_review_error": segmentation_review_error,
+        "observation": observation,
+    })
+
+
+@require_POST
 def create_image_design(request, project_id: int):
     """Queue image-guided robot concept generation without retaining the image."""
-    from .image_design import _num
+    from .image_design import _num, _clean_view_label, validate_reference_observation
     from .vision import _image_format_allowed
     from .image_design_worker import start_image_design
 
@@ -275,7 +369,6 @@ def create_image_design(request, project_id: int):
     content_type = image_file.content_type or ""
     if not _image_format_allowed(content_type, image):
         return JsonResponse({"error": "Upload a valid JPEG, PNG, or WebP reference image."}, status=400)
-    from .image_design import _clean_view_label
     extra_views = []
     for slot in ("2", "3"):
         extra_file = request.FILES.get(f"image_{slot}")
@@ -303,7 +396,17 @@ def create_image_design(request, project_id: int):
     if quota_denied is not None:
         return quota_denied
     local_only = (request.POST.get("local_only") or "").strip().lower() in ("1", "true", "yes", "on")
+    primary_view = _clean_view_label(request.POST.get("view", "front"))
+    reviewed_observation = None
+    raw_observation = (request.POST.get("visual_observation") or "").strip()
+    if raw_observation:
+        try:
+            reviewed_observation = validate_reference_observation(json.loads(raw_observation), primary_view)
+        except (json.JSONDecodeError, ValueError) as exc:
+            return JsonResponse({"error": str(exc) or "Analyze the robot reference image again before creating a run."}, status=400)
     mission = {"robot_class": "image_robot_design", "brief": brief, "target_height_m": height, "constraints": constraints, "local_only": local_only}
+    if reviewed_observation:
+        mission["reviewed_visual_observation"] = reviewed_observation
     job, created = Job.objects.get_or_create(
         project=project,
         idempotency_key=key,
@@ -313,7 +416,7 @@ def create_image_design(request, project_id: int):
         return JsonResponse({"id": job.id, "state": job.state, "created": False}, status=200)
     store_artifact(job, "mission", json.dumps(mission, indent=2), "mission/v1")
     JobEvent.objects.create(job=job, state=job.state, detail={"stage": "queued", "message": "Waiting to design a robot concept from the reference image."})
-    start_image_design(job.id, image, content_type, brief, height, constraints, extra_views or None, _clean_view_label(request.POST.get("view", "front")), local_only=local_only)
+    start_image_design(job.id, image, content_type, brief, height, constraints, extra_views or None, primary_view, local_only=local_only, reviewed_observation=reviewed_observation)
     return JsonResponse({"id": job.id, "state": states.QUEUED, "created": True}, status=202)
 
 

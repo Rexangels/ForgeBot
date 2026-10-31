@@ -188,6 +188,14 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
   const [proposalDimensions, setProposalDimensions] = useState(["", "", ""]);
   const [revisionProposal, setRevisionProposal] = useState(null);
   const [revisionNotice, setRevisionNotice] = useState("");
+  const [expandedCritique, setExpandedCritique] = useState(false);
+
+  useEffect(() => {
+    if (!expandedCritique) return undefined;
+    const closeOnEscape = (event) => { if (event.key === "Escape") setExpandedCritique(false); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [expandedCritique]);
   const autoImportRef = useRef(null);
   const autoPartIdsRef = useRef(new Set());
 
@@ -477,35 +485,161 @@ export default function ComponentAssemblyEditor({ freecadExport = null, designSp
         <section className="component-ai-panel">
           <div className="component-section-title">
             <strong>Vision-in-the-loop verification</strong>
-            <span style={{ color: designSpec.visual_critique.passed_verification ? "#10b981" : "#f59e0b", fontWeight: 600 }}>
-              {designSpec.visual_critique.passed_verification ? "Verified" : "Review advisory"} · {Math.round((designSpec.visual_critique.visual_match_score || 0) * 100)}% match
-            </span>
+            {designSpec.visual_critique.status === "skipped" ? (
+              <span style={{ color: "#94a3b8", fontWeight: 600 }}>Skipped</span>
+            ) : (
+              <span style={{ color: designSpec.visual_critique.passed_verification ? "#10b981" : "#f59e0b", fontWeight: 600 }}>
+                {designSpec.visual_critique.passed_verification ? "Verified" : "Review advisory"} · {Math.round((designSpec.visual_critique.visual_match_score || 0) * 100)}% match
+              </span>
+            )}
           </div>
-          <p className="muted">{designSpec.visual_critique.critique_summary}</p>
-          {designSpec.visual_critique.multiview_render_base64 && (
-            <div style={{ marginTop: 8, marginBottom: 8, borderRadius: 6, overflow: "hidden", border: "1px solid #334155" }}>
-              <img
-                src={`data:image/png;base64,${designSpec.visual_critique.multiview_render_base64}`}
-                alt="4-view 3D CAD render verification"
-                style={{ width: "100%", display: "block" }}
-              />
-            </div>
+          {designSpec.visual_critique.status === "skipped" ? (
+            <p className="muted">
+              Visual critique pass was skipped{designSpec.visual_critique.reason ? `: ${designSpec.visual_critique.reason}` : "."}
+            </p>
+          ) : (
+            <>
+              <p className="muted">{designSpec.visual_critique.critique_summary}</p>
+              {designSpec.visual_critique.multiview_render_base64 && (
+                <div
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Open four-view CAD inspection"
+                  onClick={() => setExpandedCritique(true)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") setExpandedCritique(true); }}
+                  className="visual-critique-thumbnail"
+                  title="Click to expand high-res 4-view CAD inspection modal"
+                >
+                  <img
+                    src={`data:image/png;base64,${designSpec.visual_critique.multiview_render_base64}`}
+                    alt="4-view 3D CAD render verification"
+                    style={{ width: "100%", display: "block" }}
+                  />
+                  <div
+                    style={{
+                      position: "absolute",
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      background: "linear-gradient(transparent, rgba(15, 23, 42, 0.94))",
+                      padding: "16px 8px 6px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "#e2e8f0",
+                      fontSize: "0.78rem",
+                      fontWeight: 600,
+                    }}
+                  >
+                    <span>Open four-view inspection</span>
+                  </div>
+                </div>
+              )}
+              {(designSpec.visual_critique.symmetry_assessment || designSpec.visual_critique.stance_and_mounting_assessment) && (
+                <div className="component-ai-answer">
+                  <strong>Visual-spatial assessments</strong>
+                  <ul>
+                    {designSpec.visual_critique.symmetry_assessment && (
+                      <li>Symmetry: {designSpec.visual_critique.symmetry_assessment}</li>
+                    )}
+                    {designSpec.visual_critique.stance_and_mounting_assessment && (
+                      <li>Stance & mounting: {designSpec.visual_critique.stance_and_mounting_assessment}</li>
+                    )}
+                  </ul>
+                </div>
+              )}
+            </>
           )}
-          <div className="component-ai-answer">
-            <strong>Visual-spatial assessments</strong>
-            <ul>
-              {designSpec.visual_critique.symmetry_assessment && (
-                <li>Symmetry: {designSpec.visual_critique.symmetry_assessment}</li>
-              )}
-              {designSpec.visual_critique.stance_and_mounting_assessment && (
-                <li>Stance & mounting: {designSpec.visual_critique.stance_and_mounting_assessment}</li>
-              )}
-            </ul>
-          </div>
         </section>
       )}
-      {selectedPart && <section className="component-ai-panel"><div className="component-section-title"><strong>Selected component</strong><span>{selectedPart.name}</span></div>{selectedModelComponent ? <><p className="muted">{selectedModelComponent.role} · {selectedModelComponent.geometry} · {selectedModelComponent.dimensions_m.map((value) => `${(value * 1000).toFixed(0)} mm`).join(" × ")}</p>{(selectedModelComponent.functional_category || Number.isFinite(selectedModelComponent.confidence) || selectedModelComponent.visible_vs_inferred || selectedModelComponent.mount_intent || selectedModelComponent.parent_reason) && <div className="component-ai-answer"><strong>Component reasoning</strong><ul>{selectedModelComponent.functional_category && <li>Function: {selectedModelComponent.functional_category}</li>}{selectedModelComponent.visible_vs_inferred && <li>Evidence: {String(selectedModelComponent.visible_vs_inferred).replace(/_/g, " ")}{Number.isFinite(selectedModelComponent.confidence) ? ` · ${(selectedModelComponent.confidence * 100).toFixed(0)}% confidence` : ""}</li>}{selectedModelComponent.mount_intent && <li>Mount intent: {selectedModelComponent.mount_intent}</li>}{selectedModelComponent.parent_reason && <li>Attached here because: {selectedModelComponent.parent_reason}</li>}{selectedModelComponent.symmetry_group && <li>Mirrored pair: {selectedModelComponent.symmetry_group}</li>}{selectedModelComponent.sub_assembly && <li>Sub-assembly: {selectedModelComponent.sub_assembly}</li>}</ul></div>}<label>Ask about this component<textarea rows="2" maxLength="1000" placeholder="What is this part for? How does it connect to the robot?" value={componentQuestion} onChange={(event) => setComponentQuestion(event.target.value)} /></label><button className="secondary-button" type="button" disabled={busy} onClick={() => askAboutSelected().catch(() => {})}>{busy ? "Asking Meta…" : "Ask AI about this part"}</button>{componentAnswer && <div className="component-ai-answer"><strong>{componentAnswer.what_it_is}</strong><p>{componentAnswer.intended_role}</p><strong>In the design model</strong><ul>{componentAnswer.known_from_design.map((item, index) => <li key={index}>{item}</li>)}</ul><strong>Unknown / unverified</strong><ul>{componentAnswer.unknown_or_unverified.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}<label>How should this part improve?<textarea rows="2" maxLength="1200" placeholder="Example: widen the deck to carry a larger sensor" value={editInstruction} onChange={(event) => setEditInstruction(event.target.value)} /></label><button className="secondary-button" type="button" disabled={busy || !editInstruction.trim()} onClick={() => proposeSelectedEdit().catch(() => {})}>{busy ? "Working…" : "Ask AI to propose an edit"}</button>{kernelValidation?.intersections?.some((item) => item.component_ids?.includes(selectedModelComponent.id)) && <button className="secondary-button" type="button" disabled={busy} onClick={() => proposeKernelRepair().catch(() => {})}>{busy ? "Reviewing kernel finding…" : "Ask AI to propose a repair for this finding"}</button>}{editProposal && <div className="cad-sketch-proposal"><strong>Proposal · human review needed</strong><p>{editProposal.rationale}</p><small>{editProposal.review_notes}</small><div className="cad-sketch-dimensions">{(selectedModelComponent.geometry === "cylinder" ? [{ label: "Diameter", index: 0 }, { label: "Length", index: 2 }] : selectedModelComponent.geometry === "sphere" ? [{ label: "Diameter", index: 0 }] : [{ label: "Width", index: 0 }, { label: "Depth", index: 1 }, { label: "Height", index: 2 }]).map(({ label, index }) => <label key={label}>{label} (mm)<input type="number" min="5" max="5000" step="0.1" value={proposalDimensions[index]} onChange={(event) => setProposalDimensions((current) => current.map((value, i) => i === index || (selectedModelComponent.geometry === "cylinder" && index === 0 && i === 1) ? event.target.value : value))} /></label>)}</div><button className="artifact-download" type="button" disabled={busy} onClick={applySelectedEdit}>Accept edit & rebuild CAD</button></div>}<small className="muted">The model reads the saved robot wireframe and latest local kernel findings when available. Its proposal is not verified until rebuilt and checked again; it cannot certify fit, strength, or safety.</small></> : <p className="muted">This is an imported mesh without a matching component in the saved robot design, so AI inspection and sketch editing are unavailable.</p>}</section>}
-      {designSpec && onProposeDesignRevision && <section className="component-ai-panel"><div className="component-section-title"><strong>Design revision</strong><span>kernel + assembly findings</span></div><p className="muted">Ask Meta for one bounded revision (at most four part edits) against the current findings. Nothing changes until you approve and rebuild.</p><button className="secondary-button" type="button" disabled={busy} onClick={() => proposeDesignRevision().catch(() => {})}>{busy ? "Reviewing findings…" : "Propose revision from findings"}</button>{revisionProposal && <div className="cad-sketch-proposal"><strong>Revision · human review needed</strong><p>{revisionProposal.rationale}</p><ul>{revisionProposal.edits.map((edit) => <li key={edit.component_id}><small><strong>{edit.component_id}</strong>{edit.dimensions_m && <> · dims {(edit.dimensions_m.map((value) => `${(value * 1000).toFixed(0)}`).join(" × "))} mm</>}{edit.position_m && <> · at [{edit.position_m.map((value) => `${(value * 1000).toFixed(0)}`).join(", ")}] mm</>}{edit.reason && <> — {edit.reason}</>}</small></li>)}</ul><button className="artifact-download" type="button" disabled={busy || !onApplyDesignRevision} onClick={() => applyDesignRevision().catch(() => {})}>Accept revision & rebuild CAD</button> <button className="secondary-button" type="button" onClick={() => setRevisionProposal(null)}>Dismiss</button></div>}{revisionNotice && <p className="component-import-message">{revisionNotice}</p>}</section>}
+      {expandedCritique && designSpec?.visual_critique && (
+        <div
+          className="visual-critique-backdrop"
+          role="presentation"
+          onClick={() => setExpandedCritique(false)}
+        >
+          <div
+            className="visual-critique-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="visual-critique-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="visual-critique-header"
+            >
+              <div className="visual-critique-title-group">
+                <strong id="visual-critique-title">
+                  Vision-in-the-loop review
+                </strong>
+                <span role="status" className={`visual-critique-status ${designSpec.visual_critique.passed_verification ? "verified" : "advisory"}`}
+                >
+                  {designSpec.visual_critique.passed_verification ? "Verified" : "Review advisory"} · {Math.round((designSpec.visual_critique.visual_match_score || 0) * 100)}% match
+                </span>
+              </div>
+              <button
+                type="button"
+                className="visual-critique-close"
+                onClick={() => setExpandedCritique(false)}
+                aria-label="Close vision review"
+              >
+                Close
+              </button>
+            </div>
+            <div className="visual-critique-body">
+              <div className="visual-critique-render">
+                <img
+                  src={`data:image/png;base64,${designSpec.visual_critique.multiview_render_base64}`}
+                  alt="CAD assembly shown in isometric, front, side, and top views"
+                />
+              </div>
+              <div className="visual-critique-findings">
+                <div>
+                  <div className="visual-critique-section-label">
+                    Review summary
+                  </div>
+                  <p className="visual-critique-summary">
+                    {designSpec.visual_critique.critique_summary}
+                  </p>
+                </div>
+                {(designSpec.visual_critique.symmetry_assessment || designSpec.visual_critique.stance_and_mounting_assessment) && (
+                  <div className="visual-critique-assessments">
+                    <div className="visual-critique-section-label">
+                      Geometry and stance
+                    </div>
+                    <ul>
+                      {designSpec.visual_critique.symmetry_assessment && (
+                        <li><strong>Symmetry:</strong> {designSpec.visual_critique.symmetry_assessment}</li>
+                      )}
+                      {designSpec.visual_critique.stance_and_mounting_assessment && (
+                        <li><strong>Stance and mounting:</strong> {designSpec.visual_critique.stance_and_mounting_assessment}</li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+                {designSpec.visual_critique.component_adjustments?.length > 0 && (
+                  <div>
+                    <div className="visual-critique-section-label">
+                      Recommended changes
+                    </div>
+                    <div className="visual-critique-adjustments">
+                      {designSpec.visual_critique.component_adjustments.map((adj, i) => (
+                        <div key={i} className="visual-critique-adjustment">
+                          <strong>{adj.component_id}</strong>
+                          <p>{adj.issue}</p>
+                          <div><b>Suggested change:</b> {adj.suggested_action}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {selectedPart && <section className="component-ai-panel"><div className="component-section-title"><strong>Selected component</strong><span>{selectedPart.name}</span></div>{selectedModelComponent ? <><p className="muted">{selectedModelComponent.role} · {selectedModelComponent.geometry} · {selectedModelComponent.dimensions_m.map((value) => `${(value * 1000).toFixed(0)} mm`).join(" × ")}</p>{(selectedModelComponent.functional_category || Number.isFinite(selectedModelComponent.confidence) || selectedModelComponent.visible_vs_inferred || selectedModelComponent.mount_intent || selectedModelComponent.parent_reason) && <div className="component-ai-answer"><strong>Component reasoning</strong><ul>{selectedModelComponent.functional_category && <li>Function: {selectedModelComponent.functional_category}</li>}{selectedModelComponent.visible_vs_inferred && <li>Evidence: {String(selectedModelComponent.visible_vs_inferred).replace(/_/g, " ")}{Number.isFinite(selectedModelComponent.confidence) ? ` · ${(selectedModelComponent.confidence * 100).toFixed(0)}% confidence` : ""}</li>}{selectedModelComponent.mount_intent && <li>Mount intent: {selectedModelComponent.mount_intent}</li>}{selectedModelComponent.parent_reason && <li>Attached here because: {selectedModelComponent.parent_reason}</li>}{selectedModelComponent.symmetry_group && <li>Mirrored pair: {selectedModelComponent.symmetry_group}</li>}{selectedModelComponent.sub_assembly && <li>Sub-assembly: {selectedModelComponent.sub_assembly}</li>}</ul></div>}<label>Ask about this component<textarea rows="2" maxLength="1000" placeholder="What is this part for? How does it connect to the robot?" value={componentQuestion} onChange={(event) => setComponentQuestion(event.target.value)} /></label><div className="component-ai-actions"><button className="component-ai-action primary" type="button" disabled={busy} onClick={() => askAboutSelected().catch(() => {})}>{busy ? "Asking Meta…" : "Ask AI about this part"}</button></div>{componentAnswer && <div className="component-ai-answer"><strong>{componentAnswer.what_it_is}</strong><p>{componentAnswer.intended_role}</p><strong>In the design model</strong><ul>{componentAnswer.known_from_design.map((item, index) => <li key={index}>{item}</li>)}</ul><strong>Unknown / unverified</strong><ul>{componentAnswer.unknown_or_unverified.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}<label>How should this part improve?<textarea rows="2" maxLength="1200" placeholder="Example: widen the deck to carry a larger sensor" value={editInstruction} onChange={(event) => setEditInstruction(event.target.value)} /></label><div className="component-ai-actions"><button className="component-ai-action primary" type="button" disabled={busy || !editInstruction.trim()} title={!editInstruction.trim() ? "Describe the change in the field above to enable this action." : "Ask Meta to propose a bounded edit."} onClick={() => proposeSelectedEdit().catch(() => {})}>{busy ? "Preparing edit…" : !editInstruction.trim() ? "Describe a change above to enable" : "Propose an edit for this part"}</button>{kernelValidation?.intersections?.some((item) => item.component_ids?.includes(selectedModelComponent.id)) && <button className="component-ai-action secondary" type="button" disabled={busy} onClick={() => proposeKernelRepair().catch(() => {})}>{busy ? "Reviewing kernel finding…" : "Propose repair for kernel finding"}</button>}</div>{editProposal && <div className="cad-sketch-proposal"><strong>Proposal · human review needed</strong><p>{editProposal.rationale}</p><small>{editProposal.review_notes}</small><div className="cad-sketch-dimensions">{(selectedModelComponent.geometry === "cylinder" ? [{ label: "Diameter", index: 0 }, { label: "Length", index: 2 }] : selectedModelComponent.geometry === "sphere" ? [{ label: "Diameter", index: 0 }] : [{ label: "Width", index: 0 }, { label: "Depth", index: 1 }, { label: "Height", index: 2 }]).map(({ label, index }) => <label key={label}>{label} (mm)<input type="number" min="5" max="5000" step="0.1" value={proposalDimensions[index]} onChange={(event) => setProposalDimensions((current) => current.map((value, i) => (i === index || (selectedModelComponent.geometry === "cylinder" && index === 0 && i === 1)) ? event.target.value : value))} /></label>)}</div><button className="artifact-download" type="button" disabled={busy} onClick={applySelectedEdit}>Accept edit & rebuild CAD</button></div>}<small className="muted">The model reads the saved robot wireframe and latest local kernel findings when available. Its proposal is not verified until rebuilt and checked again; it cannot certify fit, strength, or safety.</small></> : <p className="muted">This is an imported mesh without a matching component in the saved robot design, so AI inspection and sketch editing are unavailable.</p>}</section>}
+      {designSpec && onProposeDesignRevision && <section className="component-ai-panel"><div className="component-section-title"><strong>Design revision</strong><span>kernel + assembly findings</span></div><p className="muted">Ask Meta for one bounded revision (at most four part edits) against the current findings. Nothing changes until you approve and rebuild.</p><div className="component-ai-actions"><button className="component-ai-action primary" type="button" disabled={busy} onClick={() => proposeDesignRevision().catch(() => {})}>{busy ? "Reviewing findings…" : "Propose revision from findings"}</button></div>{revisionProposal && <div className="cad-sketch-proposal"><strong>Revision · human review needed</strong><p>{revisionProposal.rationale}</p><ul>{revisionProposal.edits.map((edit) => <li key={edit.component_id}><small><strong>{edit.component_id}</strong>{edit.dimensions_m && <> · dims {(edit.dimensions_m.map((value) => `${(value * 1000).toFixed(0)}`).join(" × "))} mm</>}{edit.position_m && <> · at [{edit.position_m.map((value) => `${(value * 1000).toFixed(0)}`).join(", ")}] mm</>}{edit.reason && <> — {edit.reason}</>}</small></li>)}</ul><button className="artifact-download" type="button" disabled={busy || !onApplyDesignRevision} onClick={() => applyDesignRevision().catch(() => {})}>Accept revision & rebuild CAD</button> <button className="secondary-button" type="button" onClick={() => setRevisionProposal(null)}>Dismiss</button></div>}{revisionNotice && <p className="component-import-message">{revisionNotice}</p>}</section>}
       {(overlaps.length > 0 || assemblyFindings.length > 0) && <div className="component-findings"><strong>Browser assembly findings · approximate</strong>{[...assemblyFindings, ...overlaps].map((message) => <p key={message}>{message}</p>)}</div>}{kernelValidation && <div className="component-findings"><strong>FreeCAD solid-kernel check · {kernelValidation.status?.replace(/_/g, " ")}</strong><p>{kernelValidation.component_validity?.filter((item) => item.valid).length || 0}/{kernelValidation.component_validity?.length || 0} components have valid solids · {kernelValidation.intersections?.length || 0} intersecting or failed pair checks</p>{kernelValidation.intersections?.slice(0, 12).map((item, index) => <p key={`${item.component_ids?.join("-")}-${index}`}>{item.component_ids?.join(" ↔ ")} · {item.status === "check_failed" ? item.message : `${Number(item.intersection_volume_mm3).toFixed(2)} mm³ overlap; review mount intent`}</p>)}{kernelValidation.intersections?.length > 12 && <small>{kernelValidation.intersections.length - 12} more pairs are recorded in the export report.</small>}</div>}<p className="panel-footnote">FreeCAD exact solid checks detect geometric validity and static intersections. Approximate mesh bounds remain visual warnings. Neither check covers moving collisions, mount tolerances, fasteners, strength, or manufacturability.</p></div></div>
   </div>;
 }

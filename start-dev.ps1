@@ -15,8 +15,10 @@ $worker = Start-Process -FilePath $python -ArgumentList "manage.py", "runworker"
 Write-Host "Worker started (pid $($worker.Id)). Starting API server; stop this window to stop it."
 
 try {
+    Push-Location $backend
     & $python manage.py runserver
 } finally {
+    Pop-Location
     if (-not $worker.HasExited) {
         Stop-Process -Id $worker.Id -Force
         Write-Host "Worker stopped."
